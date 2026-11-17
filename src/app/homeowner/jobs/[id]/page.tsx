@@ -4,6 +4,7 @@ import { notFound } from "next/navigation";
 import { ArrowLeft, CheckCircle2 } from "lucide-react";
 import { cancelJobAction, confirmJobAction } from "@/app/actions/homeowner";
 import { ActionButton } from "@/components/forms";
+import { JobPhotos } from "@/components/job-photos";
 import { PageSkeleton } from "@/components/page";
 import { ReviewForm } from "@/components/review-form";
 import { JobTimeline, Stars, StatusBadge } from "@/components/status";
@@ -13,6 +14,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/misc";
 import { AUTO_CONFIRM_HOURS } from "@/lib/config";
 import { LOT_SIZE_LABEL } from "@/lib/contracts/domain";
 import { getHomeownerJob } from "@/lib/dal/jobs";
+import { listJobPhotos } from "@/lib/dal/photos";
 import { requireRole } from "@/lib/dal/session";
 import { AppError } from "@/lib/errors";
 import { firstName, formatMoney, formatWindow } from "@/lib/format";
@@ -35,7 +37,7 @@ async function JobDetail({
 }) {
   const user = await requireRole("HOMEOWNER");
   const [{ id }, query] = await Promise.all([params, searchParams]);
-  const job = await getHomeownerJob(user, id).catch((e) => {
+  const [job, photos] = await Promise.all([getHomeownerJob(user, id), listJobPhotos(user, id)]).catch((e) => {
     if (e instanceof AppError) notFound();
     throw e;
   });
@@ -141,10 +143,11 @@ async function JobDetail({
           <Card>
             <CardHeader>
               <CardTitle>Before &amp; after</CardTitle>
-              <CardDescription>Photos appear here as soon as your cleaner takes them.</CardDescription>
+              <CardDescription>Photos appear here as soon as your cleaner takes them. Tap one to see it full size.</CardDescription>
             </CardHeader>
-            {/* Member 2 adds the before/after photo viewer here once cloud photo storage is built. */}
-            <CardContent className="text-sm text-muted-foreground">No photos yet.</CardContent>
+            <CardContent>
+              <JobPhotos photos={photos} />
+            </CardContent>
           </Card>
 
           {(job.status === "COMPLETED" || job.status === "REQUESTED" || job.status === "ASSIGNED") && (

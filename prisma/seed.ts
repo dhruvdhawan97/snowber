@@ -1,8 +1,9 @@
 /**
  * Demo data for one fictional neighborhood ("Maple Hollow"): 40 homes, 25 homeowners,
- * 8 cleaner accounts, service windows for tomorrow's storm, and bookings in every
- * state a homeowner can see. Photos, shifts, tools and earnings are added by the
- * members who build those areas.
+ * 8 cleaner accounts, service windows for tomorrow's storm, bookings in every
+ * state a homeowner can see, cleaner shifts, before/after photos (generated
+ * images in the configured storage) and earnings for confirmed jobs. Tools are
+ * added by the member who builds that area.
  *
  *   npm run db:seed        (or: npx prisma db seed)
  *
@@ -11,11 +12,17 @@
  */
 import "dotenv/config";
 import { randomUUID } from "node:crypto";
+import { rm } from "node:fs/promises";
+import path from "node:path";
+import sharp from "sharp";
 import { hashPassword } from "better-auth/crypto";
 import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient, type JobStatus, type LotSize } from "../src/generated/prisma/client";
+import { PrismaClient, type JobStatus, type LotSize, type PhotoKind } from "../src/generated/prisma/client";
 import { NEIGHBORHOOD_CENTER } from "../src/lib/config";
-import { quoteForWindows } from "../src/lib/pricing";
+import { formatMoney } from "../src/lib/format";
+import { DISPLAY_MAX_PX, THUMB_MAX_PX, derivedKeys } from "../src/lib/photo-rules";
+import { jobEarnings, quoteForWindows } from "../src/lib/pricing";
+import { LOCAL_STORAGE_ROOT, getStorage } from "../src/lib/storage";
 import { addCalendarDays, zonedCalendarDate, zonedTimeToUtc } from "../src/lib/time";
 import { addTestSlots } from "../scripts/test-slots";
 
@@ -49,6 +56,42 @@ async function createUser(input: { name: string; email: string; role: "HOMEOWNER
   });
 }
 
+/** A simple drawing of a driveway, snowed in (before) or cleared (after). */
+function drivewaySvg(kind: PhotoKind, variant: number): Buffer {
+  const snowy = kind === "BEFORE";
+  const house = ["#8a5a44", "#5b6b7a", "#a0715a", "#6d5c80"][variant % 4];
+  const flakes = snowy
+    ? Array.from({ length: 60 }, (_, i) => `<circle cx="${(i * 197 + variant * 53) % 1200}" cy="${(i * 113 + variant * 31) % 600}" r="${3 + (i % 4)}" fill="#fff" opacity="0.85"/>`).join("")
+    : "";
+  return Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="900">
+  <rect width="1200" height="900" fill="${snowy ? "#b9c4d1" : "#c9d6e6"}"/>
+  <rect y="330" width="1200" height="570" fill="#f3f6fa"/>
+  <rect x="660" y="150" width="440" height="230" fill="${house}"/>
+  <polygon points="630,160 880,40 1130,160" fill="#3f3f46"/>
+  <rect x="760" y="250" width="150" height="130" fill="#d4d4d8"/>
+  <polygon points="420,900 760,380 910,380 1060,900" fill="${snowy ? "#ffffff" : "#52525b"}"/>
+  ${snowy ? "" : `<polygon points="390,900 745,380 760,380 420,900" fill="#ffffff"/><polygon points="1060,900 910,380 930,380 1100,900" fill="#ffffff"/>`}
+  ${flakes}
+  <rect x="30" y="30" width="230" height="70" rx="12" fill="#000" opacity="0.55"/>
+  <text x="145" y="78" font-family="Helvetica, Arial, sans-serif" font-size="40" font-weight="700" fill="#fff" text-anchor="middle">${kind}</text>
+</svg>`);
+}
+
+/** Stores generated display/thumbnail images and records the photo, like finalizePhoto does. */
+async function seedPhoto(jobId: string, kind: PhotoKind, uploadedById: string, takenAt: Date, variant: number) {
+  const id = randomUUID();
+  const { displayKey, thumbKey } = derivedKeys(jobId, kind, id);
+  const svg = drivewaySvg(kind, variant);
+  const display = await sharp(svg).resize({ width: DISPLAY_MAX_PX, withoutEnlargement: true }).webp({ quality: 80 }).toBuffer({ resolveWithObject: true });
+  const thumb = await sharp(svg).resize({ width: THUMB_MAX_PX }).webp({ quality: 70 }).toBuffer();
+  const storage = getStorage();
+  await storage.put(displayKey, display.data, "image/webp");
+  await storage.put(thumbKey, thumb, "image/webp");
+  await prisma.jobPhoto.create({
+    data: { id, jobId, kind, displayKey, thumbKey, width: display.info.width, height: display.info.height, takenAt, uploadedById, createdAt: takenAt },
+  });
+}
+
 // ───────────────── main ─────────────────
 
 async function main() {
@@ -56,6 +99,9 @@ async function main() {
   await prisma.$executeRawUnsafe(
     `TRUNCATE TABLE "LedgerEntry","Payment","Review","JobPhoto","_JobWindowOptions","Job","ToolRental","Tool","Shift","ServiceWindow","Property","Session","Account","Verification","User" RESTART IDENTITY CASCADE`,
   );
+
+  // Seeded photo objects from earlier runs are orphaned by the TRUNCATE above.
+  if (getStorage().name === "local") await rm(path.join(LOCAL_STORAGE_ROOT, "jobs"), { recursive: true, force: true });
 
   console.log("Creating accounts…");
   const controller = await createUser({ name: "Morgan Lee", email: "controller@snowber.test", role: "CONTROLLER" });
@@ -211,13 +257,28 @@ async function main() {
   ];
   for (const [i, h] of history.entries()) {
     const job = await book(h.p, ["yesterday"], { tipCents: h.tip, createdAt: at(-2, 18, i * 5) });
+    const confirmedAt = h.st === "CONFIRMED" ? y(10, i * 10) : undefined;
     await advance(job, h.c.id, "yesterday", h.st, {
       assigned: at(-2, 20),
       started: y(7, i * 15),
       completed: y(7, i * 15 + 25),
-      confirmed: h.st === "CONFIRMED" ? y(10, i * 10) : undefined,
+      confirmed: confirmedAt,
     });
     await prisma.job.update({ where: { id: job.id }, data: { routeOrder: (i % 3) + 1 } });
+    await seedPhoto(job.id, "BEFORE", h.c.id, y(7, i * 15 - 1), i);
+    await seedPhoto(job.id, "AFTER", h.c.id, y(7, i * 15 + 24), i);
+    if (confirmedAt) {
+      await prisma.ledgerEntry.create({
+        data: {
+          cleanerId: h.c.id,
+          type: "EARNING",
+          amountCents: jobEarnings(job),
+          jobId: job.id,
+          description: `${job.property.address}${job.tipCents > 0 ? ` (incl. ${formatMoney(job.tipCents)} tip)` : ""}`,
+          createdAt: confirmedAt,
+        },
+      });
+    }
   }
   // Two-way reviews on the confirmed history.
   const confirmed = await prisma.job.findMany({ where: { status: "CONFIRMED" }, select: { id: true, cleanerId: true, homeownerId: true } });
@@ -234,12 +295,16 @@ async function main() {
     completed: new Date(Math.min(now.getTime() - 30 * 60 * 1000, recentStart.getTime() + 55 * 60 * 1000)),
   });
   await prisma.job.update({ where: { id: graceDone.id }, data: { routeOrder: 1 } });
+  const graceDoneAt = (await prisma.job.findUniqueOrThrow({ where: { id: graceDone.id } })).completedAt!;
+  await seedPhoto(graceDone.id, "BEFORE", ava.id, new Date(recentStart.getTime() + 19 * 60 * 1000), 0);
+  await seedPhoto(graceDone.id, "AFTER", ava.id, new Date(graceDoneAt.getTime() - 60 * 1000), 0);
   const benWorking = await book(12, ["recent"], { createdAt: new Date(recentStart.getTime() - 9 * HOUR) });
   await advance(benWorking, ben.id, "recent", "IN_PROGRESS", {
     assigned: new Date(recentStart.getTime() - 8 * HOUR),
     started: new Date(now.getTime() - 15 * 60 * 1000),
   });
   await prisma.job.update({ where: { id: benWorking.id }, data: { routeOrder: 1 } });
+  await seedPhoto(benWorking.id, "BEFORE", ben.id, new Date(now.getTime() - 16 * 60 * 1000), 2);
 
   // Tomorrow's storm: a surge of requests across the three windows.
   const optionSets: W[][] = [["early"], ["early", "mid"], ["mid"], ["mid", "late"], ["late"], ["early", "mid", "late"]];
@@ -269,11 +334,31 @@ async function main() {
     await prisma.property.update({ where: { id: earlyJobs[0].propertyId }, data: { notes: "Gate code 4512. Pile snow on the left side." } });
   }
 
+  console.log("Posting cleaner shifts…");
+  const [, , chloe, diego, emma] = cleaners;
+  const shiftSpecs = [
+    // Yesterday and earlier today, covering the jobs already worked.
+    { c: ava, from: at(-1, 6), to: at(-1, 11) },
+    { c: ben, from: at(-1, 6), to: at(-1, 11) },
+    { c: ava, from: new Date(recentStart.getTime() - HOUR), to: new Date(recentStart.getTime() + 3 * HOUR) },
+    { c: ben, from: new Date(recentStart.getTime() - HOUR), to: new Date(recentStart.getTime() + 3 * HOUR) },
+    // Tomorrow's storm and the day after.
+    { c: ava, from: at(1, 6), to: at(1, 12) },
+    { c: ben, from: at(1, 6), to: at(1, 12) },
+    { c: chloe, from: at(1, 8), to: at(1, 12) },
+    { c: diego, from: at(1, 6), to: at(1, 10) },
+    { c: emma, from: at(1, 10), to: at(1, 14) },
+    { c: ava, from: at(2, 7), to: at(2, 11) },
+    { c: diego, from: at(2, 7), to: at(2, 9) },
+  ];
+  for (const s of shiftSpecs) await prisma.shift.create({ data: { cleanerId: s.c.id, startsAt: s.from, endsAt: s.to } });
+
   const counts = await prisma.job.groupBy({ by: ["status"], _count: { _all: true } });
   console.log("Jobs by status:", Object.fromEntries(counts.map((c) => [c.status, c._count._all])));
   console.log(`\nSeeded ${homeowners.length} homeowners, ${cleaners.length} cleaners, ${properties.length} properties.`);
   console.log(`Sign in with any demo account, password "${PASSWORD}":`);
   console.log("  grace.home@snowber.test · henry.home@snowber.test (senior discount) · controller@snowber.test");
+  console.log("  ava.cleaner@snowber.test · ben.cleaner@snowber.test (cleaner portal: jobs, photos, shifts, earnings)");
 }
 
 main()

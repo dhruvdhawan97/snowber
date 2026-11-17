@@ -437,7 +437,6 @@ export async function getHomeownerJob(user: CurrentUser, jobId: string) {
     },
   });
   if (!job || job.homeownerId !== user.id) throw notFound("We couldn't find that job.");
-  // Before/after photos are Member 2's area; they plug in here once photo storage exists.
   const cleanerRating = job.cleaner ? ((await ratingSummary([job.cleaner.id])).get(job.cleaner.id) ?? null) : null;
   return {
     ...job,
@@ -481,14 +480,13 @@ export async function autoConfirmStale(): Promise<number> {
   return confirmed;
 }
 
-// ───────────────────────── Cleaner preview (read-only) ─────────────────────────
+// ───────────────────────── Cleaner ─────────────────────────
 
 /**
- * Read-only list of the jobs a controller has assigned to this cleaner, with the
- * homeowner's booking details and notes. It shows that booking data reaches the
- * cleaner; the full cleaner workflow (start, photos, finish) is Member 2's area.
+ * The jobs a controller has assigned to this cleaner (upcoming, plus the last
+ * week's finished ones), with the homeowner's booking details and notes.
  */
-export async function listAssignedJobsPreview(user: CurrentUser) {
+export async function listCleanerJobs(user: CurrentUser) {
   assertRole(user, "CLEANER");
   const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
   return prisma.job.findMany({
@@ -512,8 +510,44 @@ export async function listAssignedJobsPreview(user: CurrentUser) {
       assignedWindow: { select: { startsAt: true, endsAt: true, label: true } },
       property: { select: { address: true, lotSize: true, notes: true } },
       homeowner: { select: { name: true } },
+      photos: { select: { kind: true } },
     },
   });
+}
+
+/** One job for its assigned cleaner, with what the job page needs (photos are listed separately). */
+export async function getCleanerJob(user: CurrentUser, jobId: string) {
+  assertRole(user, "CLEANER");
+  const job = await prisma.job.findUnique({
+    where: { id: jobId },
+    include: {
+      property: true,
+      assignedWindow: true,
+      homeowner: { select: { id: true, name: true } },
+      reviews: true,
+      ledgerEntries: { where: { type: "EARNING" }, select: { amountCents: true } },
+    },
+  });
+  if (!job || job.cleanerId !== user.id) throw notFound("We couldn't find that job.");
+  const homeownerRating = (await ratingSummary([job.homeownerId])).get(job.homeownerId) ?? null;
+  return {
+    ...job,
+    homeownerRating,
+    // Paid amount once confirmed; until then, what confirmation will pay.
+    earningsCents: job.ledgerEntries[0]?.amountCents ?? jobEarnings(job),
+    myReview: job.reviews.find((r) => r.authorId === user.id) ?? null,
+    reviewOfMe: job.reviews.find((r) => r.subjectId === user.id) ?? null,
+  };
+}
+
+export async function startJob(user: CurrentUser, jobId: string) {
+  assertRole(user, "CLEANER");
+  return transitionJob(jobId, "IN_PROGRESS", actorOf(user));
+}
+
+export async function completeJob(user: CurrentUser, jobId: string) {
+  assertRole(user, "CLEANER");
+  return transitionJob(jobId, "COMPLETED", actorOf(user));
 }
 
 /** Guards used by pages that only need to know whether a job exists for this user. */

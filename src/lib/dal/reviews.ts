@@ -21,6 +21,28 @@ export async function ratingSummary(userIds: readonly string[]): Promise<Map<str
   );
 }
 
+/** Reviews a cleaner has received, newest first, with their average. */
+export async function listReviewsReceived(user: CurrentUser, take = 10) {
+  assertRole(user, "CLEANER");
+  const [reviews, summary] = await Promise.all([
+    prisma.review.findMany({
+      where: { subjectId: user.id },
+      orderBy: { createdAt: "desc" },
+      take,
+      select: {
+        id: true,
+        rating: true,
+        comment: true,
+        createdAt: true,
+        author: { select: { name: true } },
+        job: { select: { id: true, property: { select: { address: true } } } },
+      },
+    }),
+    ratingSummary([user.id]),
+  ]);
+  return { reviews, summary: summary.get(user.id) ?? null };
+}
+
 /**
  * Two-way reviews after a confirmed job: the homeowner rates the cleaner and the
  * cleaner rates the house (e.g. inaccurate lot size, unsafe steps). One per author.
