@@ -1,5 +1,8 @@
 # Project Proposal: Snowber (Neighborhood Snow Clearing & Dispatch Platform)
 
+> **Running the code?** Jump to [5. Development Guide](#5-development-guide) for setup, demo accounts,
+> what each member has built, and where to plug in new features.
+
 ## Team Members
 
 | Name | Student Number | Email |
@@ -33,7 +36,7 @@ Snowber improves winter accessibility, especially for seniors and residents with
 ### Main Project Objectives and Core Functionality
 Build a responsive, role-based web application managing snow-clearing jobs from request to verified payout:
 
-1. **House Owner Portal:** Register geocoded properties and driveway/walkway sizes (Single Car, Double Car, Corner Lot Sidewalk); obtain pricing based on size and snowfall tier; select time slots, book, track progress, view before/after photos, pay, and review cleaners.
+1. **House Owner Portal:** Register geocoded properties and driveway/walkway sizes (Single Car, Double Car, Corner Lot Sidewalk); obtain pricing based on size category and time slot; select time slots, book, track progress, view before/after photos, pay, and review cleaners.
 2. **Snow Cleaner Portal:** Post shift availability, reserve rental tools, view assigned routes on a map, upload timestamped before/after photos, track earnings, and review owners/property details.
 3. **Central Office Controller Dashboard:** Review requests and available shifts, assign cleaners and grouped routes, manage tool check-out/returns/stock, and resolve disputes.
 
@@ -81,18 +84,22 @@ We chose **Next.js (App Router)** over separate React and Express applications t
 
 #### Cloud Storage Design
 We will use **AWS S3** (or S3-compatible **Cloudflare R2**) to handle all "before" and "after" snow-clearing photos. Storing binary images directly in PostgreSQL degrades query performance and bloats database backups.
-* **Workflow:** When a cleaner initiates a photo upload, the Next.js backend validates their active assignment and generates a short-lived **S3 Pre-signed PUT URL** using the AWS SDK. The client uploads the image file directly from the browser/phone to the S3 bucket.
-* **Data Linkage:** Once the upload succeeds, the client invokes a Server Action that records the S3 object key, public CDN URL, `photoType` (`BEFORE` | `AFTER`), and timestamp in the `JobPhoto` PostgreSQL table linked to the specific `ServiceRequest`.
+* **Workflow:** When a cleaner initiates a photo upload, the Next.js backend validates their active assignment and generates a short-lived (5-minute) **S3 Pre-signed PUT URL** using the AWS SDK, with the content type included in the signature. The client uploads the image file directly from the browser/phone to the S3 bucket.
+* **Data Linkage:** Once the upload succeeds, the client invokes a Server Action that reads the EXIF capture time, strips all metadata (including GPS), stores resized WebP copies, and records the object keys, `kind` (`BEFORE` | `AFTER`), capture time, and any verification flag in the `JobPhoto` table linked to the job.
+* **Access:** The bucket stays private. Pages receive short-lived pre-signed GET URLs, and only the homeowner, the assigned cleaner, and controllers can obtain them.
 
 #### Important Frontend–Backend Interactions and Data Flows
-1. **Booking & Pricing:** For area $A$ (in $\text{m}^2$), urgency multiplier $u$, base $B$, and rate $r$, the server computes:
-   $$P = B + (A \times r) \times u$$
-   Booking creates a `PENDING` `ServiceRequest`.
-2. **Dispatch & Tool Reservation:** Controller views pending requests and available shifts, then assigns grouped jobs and equipment. A Prisma `$transaction` schedules requests, saves route order, creates `ToolRental`, and decrements available stock atomically.
+1. **Booking & Pricing:** Properties store a size category, not an area. For size base $B$ (Single Car \$30, Double Car \$45, Corner Lot \$65), add-ons $a$ (sidewalk, salt), window rate $w$, timing factor $t$ (urgent bookings cost more, early bookings less), and discount $d$ (seniors / accessibility), the server computes:
+   $$P = (B + a) \times w \times t - d$$
+   Booking creates a `REQUESTED` job.
+2. **Dispatch & Tool Reservation:** Controller views pending requests and available shifts, then assigns grouped jobs and equipment. A Prisma `$transaction` schedules requests, saves route order, creates `ToolRental`, and decrements available stock atomically. Conflicting assignments are blocked in the database, not just in the UI:
+   * each job update is a compare-and-set on its current status, so two controllers cannot both assign the same job;
+   * a job can only be assigned to a cleaner whose shift covers the whole time slot, and that shift row is locked until the transaction commits, so the cleaner cannot remove it mid-assignment;
+   * PostgreSQL exclusion constraints reject overlapping shifts for one cleaner and overlapping rentals of one tool.
 3. **Verification & Payout:** Jobs require both `BEFORE` and `AFTER` photos before `COMPLETED`; owners/controllers can verify, review, and trigger simulated payouts.
 
 #### Key UI and UX Considerations
-* **Cleaner Mobile-First:** High-contrast, glove-friendly 48×48 px touch targets; guided navigation → before photo → after photo → completion.
+* **Cleaner Mobile-First:** High-contrast, glove-friendly touch targets (at least 48×48 px; 56 px for the main actions); guided navigation → before photo → start → after photo → completion.
 * **Controller Desktop:** Filterable `shadcn/ui` request/shift table beside a neighborhood map.
 * **Owner Booking:** Step-by-step wizard with visual driveway-size presets.
 
@@ -103,11 +110,18 @@ We will use **AWS S3** (or S3-compatible **Cloudflare R2**) to handle all "befor
 * **PostgreSQL:** Relational records for users, jobs, shifts, and inventory.
 * **AWS S3 / R2:** Pre-signed verification-photo uploads.
 
-### Planned Advanced Features
-1. **Geospatial Dispatching & Route Optimization (Mapbox GL JS + OSRM):**
-   * *Integration:* Within the Central Office Controller dashboard, all open `ServiceRequest` locations are rendered as color-coded pins on an interactive map. When the controller assigns multiple houses to a single cleaner's shift, the backend queries the Open Source Routing Machine (OSRM) / Mapbox Directions API to order the waypoints by shortest travel time, saving the optimized polyline and stop sequence to the `CleanerShift` record so the cleaner can follow turn-by-turn neighborhood routing.
-2. **Photo-Gated Escrow Payment & Payout System (Stripe Checkout & Connect Simulation):**
-   * *Integration:* When a House Owner books a slot, payment is authorized via Stripe Checkout (Test Mode). Funds are held in an application escrow state (`PAYMENT_HELD`). The backend state machine strictly prevents transitioning funds to the cleaner's balance (`PAID_OUT`) until both `BEFORE` and `AFTER` S3 photo keys are verified in the database, protecting both homeowners from no-shows and cleaners from non-payment.
+### Advanced Features by Category
+Route optimization and Stripe both belong to the same category (external API integration), so we count them as one. The features below are grouped by course category so each counts once:
+
+1. **User Authentication & Authorization:**
+   * *Integration:* Better Auth email/password sessions with three roles (`HOMEOWNER`, `CLEANER`, `CONTROLLER`). Every page and Server Action calls `requireRole`, and every data-access function checks the role again (`assertRole`), so a hidden button is never the only protection. Controllers can deactivate accounts, which ends their sessions.
+2. **Integration with External APIs:**
+   * *Stripe Checkout (test mode):* card, Apple Pay and Google Pay. The job is created only after Stripe confirms payment (success page and webhook, safe to run twice), and cancellations refund through Stripe. The state machine moves money to the cleaner's ledger only after both `BEFORE` and `AFTER` photos exist and the homeowner (or the 24-hour auto-confirm) confirms.
+   * *Geospatial dispatch (Leaflet + OSRM):* open jobs appear as pins on a Leaflet map (`react-leaflet`, OpenStreetMap tiles). When the controller assigns several houses to one cleaner, OSRM orders the stops by travel time and the stop order is saved on the jobs (`routeOrder`). OpenStreetMap address lookup is used when homeowners register properties.
+3. **File Handling and Processing:**
+   * *Integration:* pre-signed direct-to-S3 uploads, then server-side processing with `sharp`: auto-rotate, 1600 px and 400 px WebP copies, all metadata (including GPS) stripped, and the original deleted. The EXIF capture time is checked, and photos taken long before the slot, in the future, or out of order are flagged for the controller.
+4. **Real-Time Updates:**
+   * *Integration:* job and dispatch events are pushed to the right users over Server-Sent Events (`/api/events`), so homeowners see "started" and "done" without refreshing, and controllers see new shifts and bookings.
 
 ### Scope, Tradeoffs, and Feasibility
 * **Human-in-the-Loop Dispatch:** A Controller manages matching and equipment instead of fully automated dispatch requiring live GPS, background workers, and pickup coordination. This keeps semester scope manageable.
@@ -120,14 +134,29 @@ We will use **AWS S3** (or S3-compatible **Cloudflare R2**) to handle all "befor
 ### Major Stages of Development
 * **Stage 1 (Weeks 1–2):** Set up Next.js, TypeScript, Tailwind, `shadcn/ui`, Prisma/PostgreSQL, S3, and role-based authentication.
 * **Stage 2 (Weeks 3–4):** Implement owner bookings, cleaner shifts/tool selection, and controller request/inventory CRUD.
-* **Stage 3 (Weeks 5–6):** Add S3 photo uploads, Mapbox/Leaflet routing, and Stripe test payments.
+* **Stage 3 (Weeks 5–6):** Add S3 photo uploads, Leaflet + OSRM routing, and Stripe test payments.
 * **Stage 4 (Weeks 7–8):** Integrate job states and bidirectional reviews, test across roles, and deploy.
+
+### Delivery Timeline and Deadlines
+The **November 26 presentation** must show every core technical requirement in one working application, so the first priority is a single integrated path: **booking → dispatch → cloud photo verification → payout**. Features that don't block that path come after the presentation.
+
+| Dates | Goal | Owner | Status |
+| --- | --- | --- | --- |
+| Done by Nov 17 | Auth and roles, schema, booking and Stripe, time slots, cleaner shifts, mobile job flow, S3 photo uploads and verification, earnings, reviews | Members 1–2 | Done |
+| Nov 18–22 | Dispatch: assign requested jobs to available cleaners (using `listCleanersAvailable` and the shift-locked assignment), Leaflet map of jobs | Member 3 | To do |
+| Nov 18–22 | Tool catalog and rentals, controller dispute handling | Member 4 | To do |
+| Nov 23–24 | **Integration freeze:** run the whole path with seeded data across all four roles; fix blocking bugs only | All | To do |
+| Nov 25 | Deploy, rehearse the demo on the deployed app, record a backup video | All | To do |
+| **Nov 26** | **Presentation** | All | — |
+| Nov 27 – Dec 3 | OSRM route ordering, tool reservation during dispatch, cross-role integration tests, presentation feedback | Members 3–4, all | To do |
+| Dec 4–5 | Final report (with evidence for any measured claims), README and video | All | To do |
+| **Dec 6** | **Final deadline** | All | — |
 
 ### Team Responsibilities
 Four members own distinct full-stack feature areas, share the Prisma schema, and participate in integration/testing:
 * **Member 1 (Owner Booking & Payments):** Property registration, size-based pricing, booking/time-slot UI and APIs, Stripe Checkout test flow, and homeowner reviews.
 * **Member 2 (Cleaner Workflow & Photo Verification):** Shift availability, mobile job UI, S3 pre-signed uploads, before/after verification flow, earnings display, and cleaner reviews.
-* **Member 3 (Dispatch & Geospatial Routing):** Controller request/shift dashboard, cleaner-to-house matching APIs, grouped route assignment, Mapbox/OSRM integration, and map UI.
+* **Member 3 (Dispatch & Geospatial Routing):** Controller request/shift dashboard, cleaner-to-house matching APIs, grouped route assignment, Leaflet + OSRM integration, and map UI.
 * **Member 4 (Inventory & Shared Workflow Integrity):** Tool catalog/stock dashboard, rental check-out/return APIs, transaction-safe inventory reservation, job-status validation and dispute handling, plus cross-role integration tests.
 
 Each member implements frontend, backend, and database interactions for their area; all four review shared contracts and test end-to-end workflows.
@@ -165,7 +194,141 @@ Our initial idea was a peer-to-peer “Uber for snow shoveling” app: owners po
 Through a combination of team discussions, reviewing course specifications, reading technical documentation, and targeted AI-assisted exploration, we systematically resolved our open questions and refined our architecture:
 
 * **Course Material & Team Discussion (Database & Cloud Storage):** Reviewing the course requirements and PostgreSQL best practices quickly invalidated our initial Base64-in-SQLite hypothesis. Storing multiple high-resolution smartphone photos per job in a database table would severely degrade query performance and violate course requirements for dedicated cloud storage. Reading AWS S3 documentation led us to adopt the **Pre-signed URL pattern**, which keeps large binary payloads off our application server while maintaining strict access control.
-* **Architectural Consolidation (Express vs. Next.js):** When mapping out the 15+ endpoints required to support three distinct user roles, we realized maintaining synchronized TypeScript types across separate frontend and backend repositories would create significant friction. Prototyping a small slice in Next.js App Router demonstrated that Server Actions and shared Prisma types reduced boilerplate by nearly 40%.
+* **Architectural Consolidation (Express vs. Next.js):** When mapping out the 15+ endpoints required to support three distinct user roles, we realized maintaining synchronized TypeScript types across separate frontend and backend repositories would create significant friction. Prototyping a small slice in Next.js App Router showed that Server Actions and shared Prisma types removed the separate REST client, request/response DTOs, and duplicated validation we would otherwise maintain. (We will only report a percentage in the final report if we measure it, for example by comparing line counts for the same feature in both designs.)
 * **AI-Assisted Exploration (State Machine & Routing Feasibility):** After establishing our core three-role mental model, we used AI as an architectural sounding board in two specific areas:
-  1. *Database Edge Cases:* We prompted an AI assistant to critique our initial ER diagram for scheduling conflicts. This highlighted a race condition where two controllers might assign the same snowblower or cleaner shift simultaneously, prompting us to introduce a dedicated `ToolRental` join table and wrap dispatch assignments in Prisma interactive transactions.
-  2. *Geospatial API Evaluation:* We used AI to compare Google Maps Routes API, Mapbox Directions API, and Leaflet + OSRM for our Controller routing feature. Based on the comparison of free-tier limits and React library support (`react-map-gl`), we selected Mapbox GL JS with OSRM waypoint optimization as a feasible, zero-cost solution for student deployment.
+  1. *Database Edge Cases:* We prompted an AI assistant to critique our initial ER diagram for scheduling conflicts. This highlighted a race condition where two controllers might assign the same snowblower or cleaner shift simultaneously, prompting us to introduce a dedicated `ToolRental` join table and wrap dispatch assignments in Prisma interactive transactions. In the implementation this became exclusion constraints on shifts and rentals, compare-and-set job updates, and a row lock on the covering shift during assignment (see Section 2, Dispatch & Tool Reservation).
+  2. *Geospatial API Evaluation:* We used AI to compare Google Maps Routes API, Mapbox Directions API, and Leaflet + OSRM for our Controller routing feature. Based on the comparison of free-tier limits and React library support, we selected **Leaflet (`react-leaflet`) with OpenStreetMap tiles and OSRM waypoint ordering**: it needs no API key or billing account, which makes it the most reliable zero-cost option for student deployment.
+
+---
+
+## 5. Development Guide
+
+Next.js (App Router) · TypeScript · Tailwind CSS · shadcn/ui · PostgreSQL + Prisma.
+
+### 5.1 Implementation Status
+
+| Area                                                                                                                                                          | Status       | Where                                                                                                                                                                 |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Shared: sign-in/sign-up, roles, layout, theme, database schema                                                                                                | Included     | `src/lib/auth.ts`, `src/app/(auth)`, `src/components`, `prisma/`                                                                                                      |
+| **Member 1: owner booking & payments** — property registration, size-based pricing, booking wizard, time slots, Stripe Checkout, homeowner reviews, discounts | **Included** | `src/app/homeowner`, `src/app/controller/windows`, `src/lib/pricing.ts`, `src/lib/payments.ts`, `src/lib/dal/jobs.ts`, `src/lib/dal/windows.ts`, `src/app/api/stripe` |
+| People management, discount approvals, system status                                                                                                          | Included     | `src/app/controller` (Overview, Time slots, Users)                                                                                                                    |
+| **Member 2: cleaner portal** — shift availability, mobile job flow, S3 presigned photo uploads, before/after verification, earnings, cleaner reviews            | **Included** | `src/app/cleaner`, `src/lib/storage.ts`, `src/lib/photo-rules.ts`, `src/lib/dal/photos.ts`, `src/lib/dal/shifts.ts`, `src/lib/dal/earnings.ts`, `src/app/api/storage` |
+| **Member 3: dispatch & map routing** — assigning cleaners to booked slots, route map                                                                          | **To build** | add pages under `src/app/controller`                                                                                                                                  |
+| **Member 4: tools inventory & job-state integrity** — tool library, rentals, disputes, auto-confirm                                                           | **To build** | add pages under `src/app/controller`; rules in `src/lib/contracts/job-states.ts`                                                                                      |
+
+The **database schema already has every table** (shifts, photos, tools, rentals, ledger…), as agreed
+in the proposal, so other members can start without changing it. The implemented schema differs in a
+few names from Section 2 (for example `Job` instead of `ServiceRequest`, `Shift` instead of
+`CleanerShift`, `/homeowner` instead of `/owner`); `prisma/schema.prisma` is the source of truth.
+
+### 5.2 Quick Start
+
+**Prerequisites:** Node.js 22 LTS and PostgreSQL 14+ (or Docker: `docker compose up -d`).
+
+```bash
+cp .env.example .env     # set DATABASE_URL and BETTER_AUTH_SECRET (openssl rand -base64 32)
+npm install              # also runs `prisma generate`
+npm run db:deploy        # create the tables
+npm run db:check         # confirms which database .env points at
+npm run db:seed          # demo data (wipes the database first)
+npm run dev              # http://localhost:3000
+```
+
+#### Demo accounts (password `snowber-demo`)
+
+| Account                    | Shows                                                           |
+| -------------------------- | --------------------------------------------------------------- |
+| `grace.home@snowber.test`  | Homeowner with a job to confirm and a booking for tomorrow      |
+| `henry.home@snowber.test`  | Homeowner with an approved senior discount                      |
+| `isla.home@snowber.test`   | Homeowner whose accessibility discount waits for approval       |
+| `controller@snowber.test`  | Time slots, people management, discount requests, system status |
+| `ava.cleaner@snowber.test` | Cleaner with jobs for tomorrow, shifts, earnings and reviews    |
+| `ben.cleaner@snowber.test` | Cleaner with a job in progress (before photo taken)             |
+
+### 5.3 Member 1 Features
+
+- **Property registration** — address lookup on OpenStreetMap, a check that the home is inside the Toronto service area, and size presets (single car, double car, corner lot).
+- **Time slots** — controllers open booking windows with a price rate and close them when full (`/controller/windows`); homeowners only see open, future slots.
+- **Booking wizard** — property → time slots and extras → review and pay, with the price always computed on the server.
+- **Homeowner reviews** — after confirming a finished job, the homeowner rates the cleaner (1–5 stars and a comment).
+- **Pricing** (`src/lib/pricing.ts`):
+
+  ```
+  price = (lot base + add-ons) × window rate × timing factor − discount
+  ```
+
+  Lot base $30 / $45 / $65, sidewalk $10, salt $8; window rate set per window (0.5–3×);
+  timing: starts within 6 h ×1.5, within 24 h ×1.2, standard ×1.0, booked 3+ days ahead ×0.9;
+  senior or accessibility discount 20% (absorbed by the platform, so cleaner pay is unchanged).
+
+- **Payments** — Stripe Checkout in test mode with card, **Apple Pay and Google Pay**. The job is
+  created only after Stripe confirms payment (success page + webhook, safe to run twice); cancelling
+  refunds through Stripe. Without `STRIPE_SECRET_KEY`, payments are simulated.
+- **Discounts** — homeowners apply at `/homeowner/discounts`; controllers approve on the Users page.
+  Only the program is stored, never medical details.
+- **People** — controllers add homeowners, cleaners or controllers, and remove or restore them.
+  Removed people are signed out and can't sign in; their history stays.
+- **Database check** — `npm run db:check`, `/api/health`, and a status card on the controller overview.
+- **Light/dark theme**, the logo linking home on every page, and layouts checked at 360 px phone width.
+
+#### Stripe setup (optional)
+
+1. Create a free Stripe account, copy the test secret key into `STRIPE_SECRET_KEY`.
+2. Dashboard → Settings → Payment methods: turn on Apple Pay and Google Pay.
+3. For the webhook locally: `stripe listen --forward-to localhost:3000/api/stripe/webhook`, and copy the `whsec_…` into `STRIPE_WEBHOOK_SECRET`.
+4. Test card `4242 4242 4242 4242`. Google Pay appears in Chrome with a saved card; Apple Pay needs the app on an HTTPS domain.
+
+### 5.4 Member 2 Features
+
+- **Shift availability** (`/cleaner/shifts`) — cleaners post when they can work (up to 12 hours,
+  30 days ahead); one tap fills in an open time slot. The database rejects overlapping shifts.
+  Shifts with assigned jobs can't be removed. Dispatch reads them with `listCleanersAvailable()`
+  in `src/lib/dal/shifts.ts`.
+- **Mobile job flow** (`/cleaner/jobs/[id]`) — directions → before photo → start → after photo →
+  done, with 56 px buttons in a sticky bar at the bottom of the screen. The server enforces the
+  same order through `transitionJob`.
+- **Photo uploads** — the phone camera opens directly; the browser PUTs the photo to a 5-minute
+  presigned URL, then the server reads the EXIF capture time, strips all metadata (including GPS),
+  saves 1600 px and 400 px WebP copies and deletes the original. Up to 3 photos per step.
+- **Verification** — photos taken more than 12 hours before the time slot, with a future capture
+  time, or an after photo older than the before photo are flagged for the controller. Homeowners
+  see the photos side by side on their job page before confirming.
+- **Earnings** (`/cleaner/earnings`) — balance from the ledger, the last 7 days, money awaiting
+  confirmation and upcoming jobs (same pay rule as the ledger: 80% of the pre-discount price plus tips).
+- **Cleaner reviews** — after confirmation the cleaner rates the home and sees the homeowner's
+  review; their average rating and recent reviews are on the Earnings page.
+
+#### Photo storage setup
+
+Development needs nothing: `STORAGE_DRIVER="local"` keeps files in `./.storage` and serves them
+through `/api/storage/...` with signed, expiring URLs (the same contract as S3 presigned URLs).
+For a real bucket, set `STORAGE_DRIVER="s3"` and the `S3_*` variables in `.env`, keep the bucket
+private, and add the CORS rule shown in `.env.example` so browsers can PUT to it.
+
+### 5.5 Scripts
+
+| Command                                           | What it does                                                                             |
+| ------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `npm run dev`                                     | Development server                                                                       |
+| `npm run build` / `npm start`                     | Production build / server                                                                |
+| `npm run typecheck` · `npm run lint` · `npm test` | Checks run by CI on every pull request                                                   |
+| `npm run db:migrate`                              | Create a migration after editing `prisma/schema.prisma` (review schema changes together) |
+| `npm run db:deploy`                               | Apply migrations                                                                         |
+| `npm run db:seed`                                 | Reset and load demo data                                                                 |
+| `npm run db:check`                                | Show which database `.env` uses and whether it's ready                                   |
+
+### 5.6 Where to Plug In (Members 3–4)
+
+- **Auth:** call `requireRole("CLEANER")` / `requireRole("CONTROLLER")` in pages and actions (`src/lib/dal/session.ts`); DAL functions re-check with `assertRole`.
+- **Navigation:** add your links to `NAV` in `src/components/app-shell.tsx`.
+- **Job status changes:** go through `transitionJob` / `applyTransition` in `src/lib/dal/jobs.ts`, which validates the state machine, handles refunds and publishes live updates.
+- **Payments:** never touch `Payment` rows directly — refunds go through `getPaymentProvider().refund`, and cleaner earnings use `jobEarnings()` from `src/lib/pricing.ts`.
+- **Live updates:** `publish()` in `src/lib/events.ts`; the browser listens via `/api/events`.
+- **Photos:** `listJobPhotos(user, jobId)` in `src/lib/dal/photos.ts` returns view URLs for any role
+  allowed to see the job; render them with `<JobPhotos photos={...} showFlags />` from
+  `src/components/job-photos.tsx` (controllers should pass `showFlags`).
+- **Cleaner availability:** `listCleanersAvailable(user, { startsAt, endsAt })` in `src/lib/dal/shifts.ts`.
+  Assigning through `transitionJob(jobId, "ASSIGNED", actor, { assignment })` already rejects a cleaner
+  with no shift covering the slot and locks that shift until the transaction commits
+  (`lockCoveringShift`), so dispatch doesn't need its own availability check. For several jobs at once,
+  call `applyTransition` for each inside one `prisma.$transaction`, then `settleOutcomes`.

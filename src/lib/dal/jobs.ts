@@ -12,6 +12,7 @@ import { createCheckoutSession, getPaidCheckoutSession, getPaymentProvider, paym
 import { DISCOUNT_LABEL, discountBpsFor, jobEarnings, quoteForWindow, quoteForWindows, type DiscountProgramKey } from "@/lib/pricing";
 import { ratingSummary } from "./reviews";
 import { actorOf, assertRole, type CurrentUser } from "./session";
+import { lockCoveringShift } from "./shifts";
 
 type Tx = Prisma.TransactionClient;
 
@@ -80,6 +81,7 @@ export async function applyTransition(
       const cleaner = await tx.user.findUnique({ where: { id: assignment.cleanerId }, select: { role: true, name: true } });
       if (!window) throw notFound("That window no longer exists.");
       if (!cleaner || cleaner.role !== "CLEANER") throw invalid("Jobs can only be assigned to cleaners.");
+      await lockCoveringShift(tx, assignment.cleanerId, window);
       Object.assign(data, { cleanerId: assignment.cleanerId, assignedWindowId: window.id, assignedAt: now });
       audience.add(assignment.cleanerId);
       message = `${job.property.address}: assigned to ${firstName(cleaner.name)} for ${formatWindow(window.startsAt, window.endsAt)}`;

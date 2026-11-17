@@ -1,4 +1,5 @@
 import "server-only";
+import type { Prisma } from "@/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
 import { conflict, invalid, isExclusionViolation, notFound } from "@/lib/errors";
 import { publish } from "@/lib/events";
@@ -62,16 +63,40 @@ export async function deleteShift(user: CurrentUser, shiftId: string) {
   const shift = await prisma.shift.findUnique({ where: { id: shiftId } });
   if (!shift || shift.cleanerId !== user.id) throw notFound("We couldn't find that shift.");
   if (shift.startsAt <= new Date()) throw invalid("Shifts that have started can't be removed.");
-  const busy = await prisma.job.count({
-    where: {
-      cleanerId: user.id,
-      status: { in: [...BUSY_STATUSES] },
-      assignedWindow: { startsAt: { lt: shift.endsAt }, endsAt: { gt: shift.startsAt } },
-    },
+  await prisma.$transaction(async (tx) => {
+    // Same row lock as lockCoveringShift, so an assignment can't land between the count and the delete.
+    const locked = await tx.$queryRaw<{ id: string }[]>`SELECT id FROM "Shift" WHERE id = ${shift.id} FOR UPDATE`;
+    if (locked.length === 0) throw notFound("We couldn't find that shift.");
+    const busy = await tx.job.count({
+      where: {
+        cleanerId: user.id,
+        status: { in: [...BUSY_STATUSES] },
+        assignedWindow: { startsAt: { lt: shift.endsAt }, endsAt: { gt: shift.startsAt } },
+      },
+    });
+    if (busy > 0) throw invalid("You have jobs in this shift. Ask the controller to reassign them first.");
+    await tx.shift.delete({ where: { id: shift.id } });
   });
-  if (busy > 0) throw invalid("You have jobs in this shift. Ask the controller to reassign them first.");
-  await prisma.shift.delete({ where: { id: shift.id } });
   publish({ type: "dispatch.updated", audience: { userIds: [], controllers: true } });
+}
+
+/**
+ * Inside an assignment transaction: finds the cleaner's shift covering the whole
+ * time slot and row-locks it until commit, so the cleaner can't remove it while
+ * the job is being assigned. Throws a conflict if no shift covers the slot.
+ */
+export async function lockCoveringShift(
+  tx: Prisma.TransactionClient,
+  cleanerId: string,
+  range: { startsAt: Date; endsAt: Date },
+): Promise<string> {
+  const shift = await tx.shift.findFirst({
+    where: { cleanerId, startsAt: { lte: range.startsAt }, endsAt: { gte: range.endsAt } },
+    select: { id: true },
+  });
+  const locked = shift ? await tx.$queryRaw<{ id: string }[]>`SELECT id FROM "Shift" WHERE id = ${shift.id} FOR UPDATE` : [];
+  if (locked.length === 0) throw conflict("That cleaner hasn't posted a shift covering this time slot.");
+  return locked[0].id;
 }
 
 /** Open time slots in the next week, so cleaners can post shifts that cover them. */
