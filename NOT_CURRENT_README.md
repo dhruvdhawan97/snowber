@@ -9,7 +9,7 @@ ECE1724 course project · Next.js (App Router) · TypeScript · Tailwind CSS · 
 | Shared: sign-in/sign-up, roles, layout, theme, database schema                                                                                                | Included     | `src/lib/auth.ts`, `src/app/(auth)`, `src/components`, `prisma/`                                                                                                      |
 | **Member 1: owner booking & payments** — property registration, size-based pricing, booking wizard, time slots, Stripe Checkout, homeowner reviews, discounts | **Included** | `src/app/homeowner`, `src/app/controller/windows`, `src/lib/pricing.ts`, `src/lib/payments.ts`, `src/lib/dal/jobs.ts`, `src/lib/dal/windows.ts`, `src/app/api/stripe` |
 | People management, discount approvals, system status                                                                                                          | Included     | `src/app/controller` (Overview, Time slots, Users)                                                                                                                    |
-| **Member 2: cleaner portal** — shifts, route, before/after photos, earnings                                                                                   | **To build** | placeholder at `src/app/cleaner`                                                                                                                                      |
+| **Member 2: cleaner portal** — shift availability, mobile job flow, S3 presigned photo uploads, before/after verification, earnings, cleaner reviews            | **Included** | `src/app/cleaner`, `src/lib/storage.ts`, `src/lib/photo-rules.ts`, `src/lib/dal/photos.ts`, `src/lib/dal/shifts.ts`, `src/lib/dal/earnings.ts`, `src/app/api/storage` |
 | **Member 3: dispatch & map routing** — assigning cleaners to booked slots, route map                                                                          | **To build** | add pages under `src/app/controller`                                                                                                                                  |
 | **Member 4: tools inventory & job-state integrity** — tool library, rentals, disputes, auto-confirm                                                           | **To build** | add pages under `src/app/controller`; rules in `src/lib/contracts/job-states.ts`                                                                                      |
 
@@ -37,7 +37,8 @@ npm run dev              # http://localhost:3000
 | `henry.home@snowber.test`  | Homeowner with an approved senior discount                      |
 | `isla.home@snowber.test`   | Homeowner whose accessibility discount waits for approval       |
 | `controller@snowber.test`  | Time slots, people management, discount requests, system status |
-| `ava.cleaner@snowber.test` | Cleaner portal placeholder                                      |
+| `ava.cleaner@snowber.test` | Cleaner with jobs for tomorrow, shifts, earnings and reviews    |
+| `ben.cleaner@snowber.test` | Cleaner with a job in progress (before photo taken)             |
 
 ## Member 1 features
 
@@ -72,6 +73,33 @@ npm run dev              # http://localhost:3000
 3. For the webhook locally: `stripe listen --forward-to localhost:3000/api/stripe/webhook`, and copy the `whsec_…` into `STRIPE_WEBHOOK_SECRET`.
 4. Test card `4242 4242 4242 4242`. Google Pay appears in Chrome with a saved card; Apple Pay needs the app on an HTTPS domain.
 
+## Member 2 features
+
+- **Shift availability** (`/cleaner/shifts`) — cleaners post when they can work (up to 12 hours,
+  30 days ahead); one tap fills in an open time slot. The database rejects overlapping shifts.
+  Shifts with assigned jobs can't be removed. Dispatch reads them with `listCleanersAvailable()`
+  in `src/lib/dal/shifts.ts`.
+- **Mobile job flow** (`/cleaner/jobs/[id]`) — directions → before photo → start → after photo →
+  done, with 56 px buttons in a sticky bar at the bottom of the screen. The server enforces the
+  same order through `transitionJob`.
+- **Photo uploads** — the phone camera opens directly; the browser PUTs the photo to a 5-minute
+  presigned URL, then the server reads the EXIF capture time, strips all metadata (including GPS),
+  saves 1600 px and 400 px WebP copies and deletes the original. Up to 3 photos per step.
+- **Verification** — photos taken more than 12 hours before the time slot, with a future capture
+  time, or an after photo older than the before photo are flagged for the controller. Homeowners
+  see the photos side by side on their job page before confirming.
+- **Earnings** (`/cleaner/earnings`) — balance from the ledger, the last 7 days, money awaiting
+  confirmation and upcoming jobs (same pay rule as the ledger: 80% of the pre-discount price plus tips).
+- **Cleaner reviews** — after confirmation the cleaner rates the home and sees the homeowner's
+  review; their average rating and recent reviews are on the Earnings page.
+
+### Photo storage setup
+
+Development needs nothing: `STORAGE_DRIVER="local"` keeps files in `./.storage` and serves them
+through `/api/storage/...` with signed, expiring URLs (the same contract as S3 presigned URLs).
+For a real bucket, set `STORAGE_DRIVER="s3"` and the `S3_*` variables in `.env`, keep the bucket
+private, and add the CORS rule shown in `.env.example` so browsers can PUT to it.
+
 ## Scripts
 
 | Command                                           | What it does                                                                             |
@@ -91,4 +119,7 @@ npm run dev              # http://localhost:3000
 - **Job status changes:** go through `transitionJob` / `applyTransition` in `src/lib/dal/jobs.ts`, which validates the state machine, handles refunds and publishes live updates.
 - **Payments:** never touch `Payment` rows directly — refunds go through `getPaymentProvider().refund`, and cleaner earnings use `jobEarnings()` from `src/lib/pricing.ts`.
 - **Live updates:** `publish()` in `src/lib/events.ts`; the browser listens via `/api/events`.
-- **Photos:** the homeowner job page has a "Before & after" card waiting for the photo viewer.
+- **Photos:** `listJobPhotos(user, jobId)` in `src/lib/dal/photos.ts` returns view URLs for any role
+  allowed to see the job; render them with `<JobPhotos photos={...} showFlags />` from
+  `src/components/job-photos.tsx` (controllers should pass `showFlags`).
+- **Cleaner availability:** `listCleanersAvailable(user, { startsAt, endsAt })` in `src/lib/dal/shifts.ts`.
