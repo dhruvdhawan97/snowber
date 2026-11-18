@@ -148,7 +148,7 @@ The **November 26 presentation** must show every core technical requirement in o
 | Nov 23–24 | **Integration freeze:** run the whole path with seeded data across all four roles; fix blocking bugs only | All | To do |
 | Nov 25 | Deploy, rehearse the demo on the deployed app, record a backup video | All | To do |
 | **Nov 26** | **Presentation** | All | — |
-| Nov 27 – Dec 3 | OSRM route ordering, extend the integration tests to dispatch, presentation feedback | Members 3–4, all | To do |
+| Nov 27 – Dec 3 | OSRM route ordering, extend the integration tests to dispatch, presentation feedback | Members 3–4, all | In progress: optional OSRM table-based ordering and dispatch integration scenarios added; live walking-profile routing still requires a configured service |
 | Dec 4–5 | Final report (with evidence for any measured claims), README and video | All | To do |
 | **Dec 6** | **Final deadline** | All | — |
 
@@ -397,3 +397,23 @@ TEST_DATABASE_URL=postgresql://snowber:snowber@localhost:5432/snowber_test npm r
   who can't take large driveways instead of letting the assignment fail.
 - **Tests:** add a dispatch scenario to `tests/integration/` using the helpers in
   `tests/integration/helpers.ts`.
+
+
+### Dispatch road-network routing (Member 3)
+
+- The dispatch board works without external routing services (local nearest-neighbor fallback).
+- To calculate stop order from **road-network travel durations**, run an OSRM server
+  prepared with a **walking/foot profile** and set `OSRM_BASE_URL` in `.env`
+  (for example `http://localhost:5000`). The server uses OSRM's `table` API
+  when saving route order. The URL path uses OSRM's conventional `driving`
+  service identifier, but its actual routing profile is defined by the graph
+  loaded by your OSRM server. The public OSRM driving demo is not walking routing.
+- The map still draws straight connector lines between ordered stops; it does
+  **not** draw OSRM street geometries. If OSRM is unavailable or too slow,
+  dispatch remains usable through the pre-existing nearest-neighbor ordering.
+- `tests/osrm.test.ts` tests ordering and fallbacks without a live OSRM server.
+- `tests/integration/dispatch.test.ts` checks assignment, persistence, manual
+  ordering, duplicate protection and shift requirements against a **separate**
+  PostgreSQL test database. Use `TEST_DATABASE_URL=.../snowber_test npm run test:integration`
+  only after applying migrations to that throwaway database. These integration
+  tests **erase rows in the test database**; never point them at demo or production data.

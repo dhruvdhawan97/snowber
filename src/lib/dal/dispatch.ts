@@ -8,6 +8,7 @@ import { invalid, notFound } from "@/lib/errors";
 import { publish } from "@/lib/events";
 import { nearestNeighborOrder, type LatLng } from "@/lib/geo";
 import { overlapMinutes, routeMinutes, suggestAssignments } from "@/lib/matching";
+import { roadOrder } from "@/lib/osrm";
 import { applyTransition, settleOutcomes, type TransitionOutcome } from "./jobs";
 import { ratingSummary } from "./reviews";
 import { actorOf, assertRole, type CurrentUser } from "./session";
@@ -353,7 +354,7 @@ export async function reorderRoute(tx: Tx, cleanerId: string, windowId: string) 
   const start = fixed.length > 0 ? fixed[fixed.length - 1].property : home;
   const ordered = [
     ...fixed,
-    ...nearestNeighborOrder(
+    ...await roadOrder(
       start,
       pending.map((j) => ({ ...j, lat: j.property.lat, lng: j.property.lng })),
     ),
