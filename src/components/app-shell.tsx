@@ -25,6 +25,7 @@ const NAV: Record<Role, NavItem[]> = {
   CONTROLLER: [
     { href: "/controller", label: "Overview", exact: true },
     { href: "/controller/windows", label: "Time slots" },
+    { href: "/controller/dispatch", label: "Dispatch" },
     { href: "/controller/tools", label: "Tools" },
     { href: "/controller/disputes", label: "Disputes" },
     { href: "/controller/users", label: "Users" },
