@@ -2,8 +2,9 @@
 
 import { refresh } from "next/cache";
 import { formToObject, runAction, type ActionResult } from "@/lib/action";
-import { accountSchema, controllerAccountSchema, firstError, roleChangeSchema, windowSchema } from "@/lib/contracts/schemas";
+import { accountSchema, assignmentSchema, controllerAccountSchema, firstError, roleChangeSchema, windowSchema } from "@/lib/contracts/schemas";
 import { requireRole } from "@/lib/dal/session";
+import { assignJobs, moveStop, suggestForWindow, unassignJob } from "@/lib/dal/dispatch";
 import { ROLE_LABEL } from "@/lib/contracts/domain";
 import { createAccount, createControllerAccount, decideDiscount, removeUser, restoreUser, setUserRole } from "@/lib/dal/users";
 import { createWindow, setWindowStatus } from "@/lib/dal/windows";
@@ -87,5 +88,42 @@ export async function setWindowStatusAction(windowId: string, status: "OPEN" | "
     await setWindowStatus(user, windowId, status);
     refresh();
     return { ok: true, message: status === "OPEN" ? "Time slot reopened." : "Time slot closed to new bookings." };
+  });
+}
+
+// ── Cheng (Member 3): controller dispatch actions ──
+export async function suggestAction(windowId: string) {
+  return runAction(async () => {
+    const user = await requireRole("CONTROLLER");
+    return { ok: true, data: await suggestForWindow(user, windowId) };
+  });
+}
+
+export async function assignAction(input: { windowId: string; assignments: { jobId: string; cleanerId: string }[] }): Promise<ActionResult> {
+  return runAction(async () => {
+    const user = await requireRole("CONTROLLER");
+    const parsed = assignmentSchema.safeParse(input);
+    if (!parsed.success) return { ok: false, error: firstError(parsed.error) };
+    const count = await assignJobs(user, parsed.data.windowId, parsed.data.assignments);
+    refresh();
+    return { ok: true, message: count === 1 ? "Job assigned." : `${count} jobs assigned.` };
+  });
+}
+
+export async function unassignAction(jobId: string): Promise<ActionResult> {
+  return runAction(async () => {
+    const user = await requireRole("CONTROLLER");
+    await unassignJob(user, jobId);
+    refresh();
+    return { ok: true, message: "Job moved back to the waiting list." };
+  });
+}
+
+export async function moveStopAction(jobId: string, direction: "up" | "down"): Promise<ActionResult> {
+  return runAction(async () => {
+    const user = await requireRole("CONTROLLER");
+    await moveStop(user, jobId, direction);
+    refresh();
+    return { ok: true };
   });
 }
