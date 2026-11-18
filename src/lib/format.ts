@@ -39,6 +39,11 @@ export function formatWindow(start: Date | string, end: Date | string): string {
   return `${formatDay(start)} · ${formatTime(start)}–${formatTime(end)}`;
 }
 
+/** Like formatWindow, but spells out both days when a range crosses midnight (tool rentals). */
+export function formatRange(start: Date | string, end: Date | string): string {
+  return formatDay(start) === formatDay(end) ? formatWindow(start, end) : `${formatDateTime(start)} – ${formatDateTime(end)}`;
+}
+
 export function formatMultiplier(bps: number): string {
   return `${(bps / 10000).toFixed(2).replace(/\.?0+$/, "")}×`;
 }
