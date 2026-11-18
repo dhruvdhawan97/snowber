@@ -15,15 +15,18 @@ const NAV: Record<Role, NavItem[]> = {
     { href: "/homeowner/properties/new", label: "Add property" },
     { href: "/homeowner/discounts", label: "Discounts" },
   ],
-  // Dispatch, jobs and tools (Members 3–4) add their links here as they are built.
+  // Dispatch and the jobs list (Member 3) add their links here as they are built.
   CLEANER: [
     { href: "/cleaner", label: "My jobs", exact: true },
     { href: "/cleaner/shifts", label: "Shifts" },
+    { href: "/cleaner/tools", label: "Tools" },
     { href: "/cleaner/earnings", label: "Earnings" },
   ],
   CONTROLLER: [
     { href: "/controller", label: "Overview", exact: true },
     { href: "/controller/windows", label: "Time slots" },
+    { href: "/controller/tools", label: "Tools" },
+    { href: "/controller/disputes", label: "Disputes" },
     { href: "/controller/users", label: "Users" },
   ],
 };

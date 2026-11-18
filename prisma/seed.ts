@@ -2,8 +2,9 @@
  * Demo data for one fictional neighborhood ("Maple Hollow"): 40 homes, 25 homeowners,
  * 8 cleaner accounts, service windows for tomorrow's storm, bookings in every
  * state a homeowner can see, cleaner shifts, before/after photos (generated
- * images in the configured storage) and earnings for confirmed jobs. Tools are
- * added by the member who builds that area.
+ * images in the configured storage), earnings for confirmed jobs, and a tool
+ * library with rentals in every state (reserved, checked out, overdue, waiting
+ * for approval, one that clashes with a reservation, returned, declined).
  *
  *   npm run db:seed        (or: npx prisma db seed)
  *
@@ -21,6 +22,7 @@ import { PrismaClient, type JobStatus, type LotSize, type PhotoKind } from "../s
 import { NEIGHBORHOOD_CENTER } from "../src/lib/config";
 import { formatMoney } from "../src/lib/format";
 import { DISPLAY_MAX_PX, THUMB_MAX_PX, derivedKeys } from "../src/lib/photo-rules";
+import { rentalFeeDescription } from "../src/lib/contracts/rental-states";
 import { jobEarnings, quoteForWindows } from "../src/lib/pricing";
 import { LOCAL_STORAGE_ROOT, getStorage } from "../src/lib/storage";
 import { addCalendarDays, zonedCalendarDate, zonedTimeToUtc } from "../src/lib/time";
@@ -353,12 +355,66 @@ async function main() {
   ];
   for (const s of shiftSpecs) await prisma.shift.create({ data: { cleanerId: s.c.id, startsAt: s.from, endsAt: s.to } });
 
+  console.log("Stocking the tool library…");
+  const [, , , , , farah, gus] = cleaners;
+  const tool = async (name: string, type: "SHOVEL" | "SNOW_BLOWER" | "SALT_SPREADER" | "ICE_CHOPPER", feeCents: number, extra: { status?: "MAINTENANCE"; notes?: string } = {}) =>
+    prisma.tool.create({ data: { name, type, feeCents, ...extra } });
+  const tools = {
+    blowerA: await tool("Snow blower A", "SNOW_BLOWER", 1500, { notes: "24-inch two-stage. Fuel can is on the shelf." }),
+    blowerB: await tool("Snow blower B", "SNOW_BLOWER", 1500),
+    blowerC: await tool("Snow blower C", "SNOW_BLOWER", 1500, { status: "MAINTENANCE", notes: "Auger belt being replaced." }),
+    shovel: await tool("Ergonomic shovel", "SHOVEL", 300),
+    spreader: await tool("Walk-behind salt spreader", "SALT_SPREADER", 500),
+    chopper: await tool("Ice chopper", "ICE_CHOPPER", 400),
+  };
+
+  /** A rental, plus its fee on the cleaner's ledger once approved (like transitionRental does). */
+  async function rent(
+    t: (typeof tools)[keyof typeof tools],
+    cleanerId: string,
+    startsAt: Date,
+    endsAt: Date,
+    status: "REQUESTED" | "APPROVED" | "RETURNED" | "REJECTED",
+    decidedAt?: Date,
+  ) {
+    const rental = await prisma.toolRental.create({
+      data: { toolId: t.id, cleanerId, startsAt, endsAt, status, feeCents: t.feeCents, decidedAt, createdAt: decidedAt ? new Date(decidedAt.getTime() - HOUR) : now },
+    });
+    if (status === "APPROVED" || status === "RETURNED") {
+      await prisma.ledgerEntry.create({
+        data: {
+          cleanerId,
+          type: "RENTAL_FEE",
+          amountCents: -t.feeCents,
+          rentalId: rental.id,
+          description: rentalFeeDescription(t.name, rental),
+          createdAt: decidedAt ?? now,
+        },
+      });
+    }
+    return rental;
+  }
+  // Ava has no snow blower of her own: she rented one yesterday, and has one reserved for
+  // tomorrow's storm, which covers the large driveways the controller gave her.
+  await rent(tools.blowerA, ava.id, at(-1, 6), at(-1, 11), "RETURNED", at(-2, 19));
+  await rent(tools.blowerA, ava.id, at(1, 6), at(1, 12), "APPROVED", new Date(now.getTime() - 2 * HOUR));
+  // Ben took the ice chopper out this morning and hasn't brought it back.
+  await rent(tools.chopper, ben.id, new Date(recentStart.getTime() - HOUR), new Date(recentStart.getTime() + 2 * HOUR), "APPROVED", new Date(recentStart.getTime() - 2 * HOUR));
+  // Waiting for the controller: Chloe wants blower B for her shift; Emma asked for
+  // blower A, which overlaps Ava's reservation, so it can only be declined.
+  await rent(tools.blowerB, chloe.id, at(1, 8), at(1, 12), "REQUESTED");
+  await rent(tools.blowerA, emma.id, at(1, 10), at(1, 14), "REQUESTED");
+  await rent(tools.spreader, gus.id, at(2, 7), at(2, 11), "REQUESTED");
+  await rent(tools.shovel, diego.id, at(2, 7), at(2, 9), "APPROVED", new Date(now.getTime() - HOUR));
+  await rent(tools.blowerB, farah.id, at(-1, 6), at(-1, 10), "REJECTED", at(-2, 20));
+
   const counts = await prisma.job.groupBy({ by: ["status"], _count: { _all: true } });
   console.log("Jobs by status:", Object.fromEntries(counts.map((c) => [c.status, c._count._all])));
   console.log(`\nSeeded ${homeowners.length} homeowners, ${cleaners.length} cleaners, ${properties.length} properties.`);
   console.log(`Sign in with any demo account, password "${PASSWORD}":`);
   console.log("  grace.home@snowber.test · henry.home@snowber.test (senior discount) · controller@snowber.test");
-  console.log("  ava.cleaner@snowber.test · ben.cleaner@snowber.test (cleaner portal: jobs, photos, shifts, earnings)");
+  console.log("  ava.cleaner@snowber.test · ben.cleaner@snowber.test (cleaner portal: jobs, photos, shifts, tools, earnings)");
+  console.log(`Tool library: ${Object.keys(tools).length} tools; requests, reservations and an overdue rental for controller@snowber.test.`);
 }
 
 main()

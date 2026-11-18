@@ -144,11 +144,11 @@ The **November 26 presentation** must show every core technical requirement in o
 | --- | --- | --- | --- |
 | Done by Nov 17 | Auth and roles, schema, booking and Stripe, time slots, cleaner shifts, mobile job flow, S3 photo uploads and verification, earnings, reviews | Members 1–2 | Done |
 | Nov 18–22 | Dispatch: assign requested jobs to available cleaners (using `listCleanersAvailable` and the shift-locked assignment), Leaflet map of jobs | Member 3 | To do |
-| Nov 18–22 | Tool catalog and rentals, controller dispute handling | Member 4 | To do |
+| Nov 18–22 | Tool catalog and rentals, controller dispute handling, snow-blower check at assignment, auto-confirm endpoint, cross-role integration tests | Member 4 | Done |
 | Nov 23–24 | **Integration freeze:** run the whole path with seeded data across all four roles; fix blocking bugs only | All | To do |
 | Nov 25 | Deploy, rehearse the demo on the deployed app, record a backup video | All | To do |
 | **Nov 26** | **Presentation** | All | — |
-| Nov 27 – Dec 3 | OSRM route ordering, tool reservation during dispatch, cross-role integration tests, presentation feedback | Members 3–4, all | To do |
+| Nov 27 – Dec 3 | OSRM route ordering, extend the integration tests to dispatch, presentation feedback | Members 3–4, all | To do |
 | Dec 4–5 | Final report (with evidence for any measured claims), README and video | All | To do |
 | **Dec 6** | **Final deadline** | All | — |
 
@@ -214,7 +214,7 @@ Next.js (App Router) · TypeScript · Tailwind CSS · shadcn/ui · PostgreSQL + 
 | People management, discount approvals, system status                                                                                                          | Included     | `src/app/controller` (Overview, Time slots, Users)                                                                                                                    |
 | **Member 2: cleaner portal** — shift availability, mobile job flow, S3 presigned photo uploads, before/after verification, earnings, cleaner reviews            | **Included** | `src/app/cleaner`, `src/lib/storage.ts`, `src/lib/photo-rules.ts`, `src/lib/dal/photos.ts`, `src/lib/dal/shifts.ts`, `src/lib/dal/earnings.ts`, `src/app/api/storage` |
 | **Member 3: dispatch & map routing** — assigning cleaners to booked slots, route map                                                                          | **To build** | add pages under `src/app/controller`                                                                                                                                  |
-| **Member 4: tools inventory & job-state integrity** — tool library, rentals, disputes, auto-confirm                                                           | **To build** | add pages under `src/app/controller`; rules in `src/lib/contracts/job-states.ts`                                                                                      |
+| **Member 4: tools inventory & job-state integrity** — tool library, rentals, disputes, auto-confirm, workflow checks, integration tests                       | **Included** | `src/app/controller/tools`, `src/app/controller/disputes`, `src/app/cleaner/tools`, `src/lib/contracts/rental-states.ts`, `src/lib/dal/rentals.ts`, `src/lib/dal/tools.ts`, `src/lib/dal/disputes.ts`, `src/lib/dal/integrity.ts`, `src/app/api/cron`, `tests/integration` |
 
 The **database schema already has every table** (shifts, photos, tools, rentals, ledger…), as agreed
 in the proposal, so other members can start without changing it. The implemented schema differs in a
@@ -241,8 +241,8 @@ npm run dev              # http://localhost:3000
 | `grace.home@snowber.test`  | Homeowner with a job to confirm and a booking for tomorrow      |
 | `henry.home@snowber.test`  | Homeowner with an approved senior discount                      |
 | `isla.home@snowber.test`   | Homeowner whose accessibility discount waits for approval       |
-| `controller@snowber.test`  | Time slots, people management, discount requests, system status |
-| `ava.cleaner@snowber.test` | Cleaner with jobs for tomorrow, shifts, earnings and reviews    |
+| `controller@snowber.test`  | Time slots, people, discounts, tool library (requests, a clash, an overdue tool), an open dispute, workflow checks |
+| `ava.cleaner@snowber.test` | Cleaner with jobs for tomorrow, shifts, a reserved snow blower, earnings and reviews |
 | `ben.cleaner@snowber.test` | Cleaner with a job in progress (before photo taken)             |
 
 ### 5.3 Member 1 Features
@@ -305,19 +305,77 @@ through `/api/storage/...` with signed, expiring URLs (the same contract as S3 p
 For a real bucket, set `STORAGE_DRIVER="s3"` and the `S3_*` variables in `.env`, keep the bucket
 private, and add the CORS rule shown in `.env.example` so browsers can PUT to it.
 
-### 5.5 Scripts
+### 5.5 Member 4 Features
+
+- **Tool library** (`/controller/tools`) — the controller adds tools with a fee per rental and moves
+  them between *in service*, *out for repair* and *retired*. A tool with reservations that haven't
+  finished can't leave service; retiring one declines its pending requests. Overdue tools are listed
+  first, with the cleaner's phone number.
+- **Rentals** (`/cleaner/tools`) — cleaners ask for a tool for up to 24 hours, up to 30 days ahead;
+  one tap fills in one of their shifts. They see when each tool is already reserved (times only,
+  never who has it) and can cancel before pickup.
+- **Check-out and check-in** — approving a request reserves the tool and charges its fee to the
+  cleaner's ledger (`RENTAL_FEE`); cancelling before pickup refunds it (`ADJUSTMENT`), once. After
+  pickup the controller checks the tool back in; late returns are noted.
+- **Transaction-safe reservation** — `transitionRental` in `src/lib/dal/rentals.ts` is the only code
+  that changes a rental, using the pure state machine in `src/lib/contracts/rental-states.ts`. It locks
+  the tool, then the rental (always in that order, so it can't deadlock with a status change), writes
+  the status with compare-and-set, and the `ToolRental_no_overlap` exclusion constraint makes
+  double-booking impossible even when two approvals race. Requests that clash with a reservation are
+  marked on the dashboard and can only be declined.
+- **Snow blowers at assignment** — large driveways need a blower. Assigning a job with
+  `requiresBlower` (through `transitionJob(…, "ASSIGNED")`) now also requires the cleaner to own one
+  or hold an approved blower rental covering the whole time slot; that rental is share-locked until
+  the assignment commits, and a rental a job depends on can't be cancelled.
+- **Disputes** (`/controller/disputes`) — the homeowner's reason, both people's contact details, the
+  money involved and the before/after photos with upload flags. The controller pays the cleaner
+  (`DISPUTED → CONFIRMED`) or refunds the homeowner (`DISPUTED → CANCELLED`), both through the job
+  state machine; resolved disputes stay listed for two weeks.
+- **24-hour auto-confirm** — `POST /api/cron/auto-confirm` with `Authorization: Bearer $CRON_SECRET`
+  confirms (and pays) finished jobs nobody answered. The same sweep runs when a homeowner or the
+  controller opens their overview, so nothing is lost without a scheduler.
+- **Workflow checks** — the controller overview lists anything that doesn't add up: confirmed jobs
+  with no cleaner payment, cancelled jobs not refunded, jobs past a photo step without the photo,
+  large driveways without a blower, overdue tools, late auto-confirmation. It normally says
+  "All checks pass".
+
+#### Scheduling auto-confirm
+
+Set `CRON_SECRET` in `.env` (the `replace-me` placeholder is refused), then call the endpoint every
+15 minutes from any scheduler, for example a crontab line on the server:
+
+```bash
+*/15 * * * * curl -fsS -X POST -H "Authorization: Bearer $CRON_SECRET" https://<your-host>/api/cron/auto-confirm
+```
+
+#### Integration tests
+
+`npm test` runs the fast unit tests. `npm run test:integration` drives every role through the real
+data-access layer against a throwaway database: a full storm morning (booking → blower rental →
+assignment → photos → dispute → payout), racing approvals, refunds, check-in, tool status rules, the
+cron endpoint and the workflow checks. The tests wipe the database, so they only run when
+`TEST_DATABASE_URL` names a database with "test" in its name:
+
+```bash
+createdb snowber_test
+DATABASE_URL=postgresql://snowber:snowber@localhost:5432/snowber_test npx prisma migrate deploy
+TEST_DATABASE_URL=postgresql://snowber:snowber@localhost:5432/snowber_test npm run test:integration
+```
+
+### 5.6 Scripts
 
 | Command                                           | What it does                                                                             |
 | ------------------------------------------------- | ---------------------------------------------------------------------------------------- |
 | `npm run dev`                                     | Development server                                                                       |
 | `npm run build` / `npm start`                     | Production build / server                                                                |
 | `npm run typecheck` · `npm run lint` · `npm test` | Checks run by CI on every pull request                                                   |
+| `npm run test:integration`                        | Cross-role tests against `TEST_DATABASE_URL` (see 5.5)                                   |
 | `npm run db:migrate`                              | Create a migration after editing `prisma/schema.prisma` (review schema changes together) |
 | `npm run db:deploy`                               | Apply migrations                                                                         |
 | `npm run db:seed`                                 | Reset and load demo data                                                                 |
 | `npm run db:check`                                | Show which database `.env` uses and whether it's ready                                   |
 
-### 5.6 Where to Plug In (Members 3–4)
+### 5.7 Where to Plug In (Member 3)
 
 - **Auth:** call `requireRole("CLEANER")` / `requireRole("CONTROLLER")` in pages and actions (`src/lib/dal/session.ts`); DAL functions re-check with `assertRole`.
 - **Navigation:** add your links to `NAV` in `src/components/app-shell.tsx`.
@@ -332,3 +390,10 @@ private, and add the CORS rule shown in `.env.example` so browsers can PUT to it
   with no shift covering the slot and locks that shift until the transaction commits
   (`lockCoveringShift`), so dispatch doesn't need its own availability check. For several jobs at once,
   call `applyTransition` for each inside one `prisma.$transaction`, then `settleOutcomes`.
+- **Snow blowers:** jobs with `requiresBlower` are refused (a `CONFLICT` error with a readable message)
+  unless the cleaner owns a blower (`ownsBlower` from `listCleanersAvailable`) or holds an approved
+  blower rental covering the slot. `listCleanersWithRentedBlower(user, { startsAt, endsAt })` in
+  `src/lib/dal/rentals.ts` returns those cleaners' ids, so the dispatch board can grey out cleaners
+  who can't take large driveways instead of letting the assignment fail.
+- **Tests:** add a dispatch scenario to `tests/integration/` using the helpers in
+  `tests/integration/helpers.ts`.

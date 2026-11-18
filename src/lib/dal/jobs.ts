@@ -12,6 +12,7 @@ import { createCheckoutSession, getPaidCheckoutSession, getPaymentProvider, paym
 import { DISCOUNT_LABEL, discountBpsFor, jobEarnings, quoteForWindow, quoteForWindows, type DiscountProgramKey } from "@/lib/pricing";
 import { ratingSummary } from "./reviews";
 import { actorOf, assertRole, type CurrentUser } from "./session";
+import { lockBlowerFor } from "./rentals";
 import { lockCoveringShift } from "./shifts";
 
 type Tx = Prisma.TransactionClient;
@@ -78,10 +79,12 @@ export async function applyTransition(
       if (!assignment) throw invalid("Missing assignment details.");
       // Sequential on purpose: a transaction uses one connection, which runs one query at a time.
       const window = await tx.serviceWindow.findUnique({ where: { id: assignment.windowId } });
-      const cleaner = await tx.user.findUnique({ where: { id: assignment.cleanerId }, select: { role: true, name: true } });
+      const cleaner = await tx.user.findUnique({ where: { id: assignment.cleanerId }, select: { role: true, name: true, ownsBlower: true } });
       if (!window) throw notFound("That window no longer exists.");
       if (!cleaner || cleaner.role !== "CLEANER") throw invalid("Jobs can only be assigned to cleaners.");
       await lockCoveringShift(tx, assignment.cleanerId, window);
+      // Large lots need a snow blower, owned or rented; a covering rental is locked until commit.
+      if (job.requiresBlower) await lockBlowerFor(tx, { id: assignment.cleanerId, name: cleaner.name, ownsBlower: cleaner.ownsBlower }, window);
       Object.assign(data, { cleanerId: assignment.cleanerId, assignedWindowId: window.id, assignedAt: now });
       audience.add(assignment.cleanerId);
       message = `${job.property.address}: assigned to ${firstName(cleaner.name)} for ${formatWindow(window.startsAt, window.endsAt)}`;
@@ -141,7 +144,9 @@ export async function applyTransition(
       message =
         actor.kind === "system"
           ? `${job.property.address}: auto-confirmed after ${AUTO_CONFIRM_HOURS} hours`
-          : `${job.property.address}: confirmed`;
+          : job.status === "DISPUTED"
+            ? `${job.property.address}: dispute resolved, the cleaner is paid`
+            : `${job.property.address}: confirmed`;
       break;
     }
     case "DISPUTED":
@@ -158,7 +163,10 @@ export async function applyTransition(
         });
         if (remaining > 0) refund = { externalId: job.payment.externalId, amountCents: remaining };
       }
-      message = `${job.property.address}: cancelled and refunded`;
+      message =
+        job.status === "DISPUTED"
+          ? `${job.property.address}: dispute resolved, the homeowner is refunded`
+          : `${job.property.address}: cancelled and refunded`;
       break;
     }
   }
