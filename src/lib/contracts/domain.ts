@@ -65,6 +65,12 @@ export const TOOL_TYPE_LABEL: Record<ToolType, string> = {
   ICE_CHOPPER: "Ice chopper",
 };
 
+export const TOOL_STATUS_LABEL: Record<ToolStatus, string> = {
+  AVAILABLE: "In service",
+  MAINTENANCE: "Out for repair",
+  RETIRED: "Retired",
+};
+
 export const RENTAL_STATUS_LABEL: Record<RentalStatus, string> = {
   REQUESTED: "Requested",
   APPROVED: "Approved",
