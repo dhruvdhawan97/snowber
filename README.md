@@ -143,12 +143,12 @@ The **November 26 presentation** must show every core technical requirement in o
 | Dates | Goal | Owner | Status |
 | --- | --- | --- | --- |
 | Done by Nov 17 | Auth and roles, schema, booking and Stripe, time slots, cleaner shifts, mobile job flow, S3 photo uploads and verification, earnings, reviews | Members 1–2 | Done |
-| Nov 18–22 | Dispatch: assign requested jobs to available cleaners (using `listCleanersAvailable` and the shift-locked assignment), Leaflet map of jobs | Member 3 | To do |
+| Nov 18–22 | Dispatch board, matching suggestions, Leaflet map, optional OSRM road-network ordering, dispatch integration tests | Member 3 | Done |
 | Nov 18–22 | Tool catalog and rentals, controller dispute handling, snow-blower check at assignment, auto-confirm endpoint, cross-role integration tests | Member 4 | Done |
 | Nov 23–24 | **Integration freeze:** run the whole path with seeded data across all four roles; fix blocking bugs only | All | To do |
 | Nov 25 | Deploy, rehearse the demo on the deployed app, record a backup video | All | To do |
 | **Nov 26** | **Presentation** | All | — |
-| Nov 27 – Dec 3 | OSRM route ordering, extend the integration tests to dispatch, presentation feedback | Members 3–4, all | In progress: optional OSRM table-based ordering and dispatch integration scenarios added; live walking-profile routing still requires a configured service |
+| Nov 27 – Dec 3 | Optional live OSRM walking-profile server for demos, presentation feedback, polish | Members 3–4, all | To do |
 | Dec 4–5 | Final report (with evidence for any measured claims), README and video | All | To do |
 | **Dec 6** | **Final deadline** | All | — |
 
@@ -213,7 +213,7 @@ Next.js (App Router) · TypeScript · Tailwind CSS · shadcn/ui · PostgreSQL + 
 | **Member 1: owner booking & payments** — property registration, size-based pricing, booking wizard, time slots, Stripe Checkout, homeowner reviews, discounts | **Included** | `src/app/homeowner`, `src/app/controller/windows`, `src/lib/pricing.ts`, `src/lib/payments.ts`, `src/lib/dal/jobs.ts`, `src/lib/dal/windows.ts`, `src/app/api/stripe` |
 | People management, discount approvals, system status                                                                                                          | Included     | `src/app/controller` (Overview, Time slots, Users)                                                                                                                    |
 | **Member 2: cleaner portal** — shift availability, mobile job flow, S3 presigned photo uploads, before/after verification, earnings, cleaner reviews            | **Included** | `src/app/cleaner`, `src/lib/storage.ts`, `src/lib/photo-rules.ts`, `src/lib/dal/photos.ts`, `src/lib/dal/shifts.ts`, `src/lib/dal/earnings.ts`, `src/app/api/storage` |
-| **Member 3: dispatch & map routing** — assigning cleaners to booked slots, route map                                                                          | **To build** | add pages under `src/app/controller`                                                                                                                                  |
+| **Member 3: dispatch & map routing** — assigning cleaners to booked slots, matching suggestions, Leaflet map, optional OSRM route order                       | **Included** | `src/app/controller/dispatch`, `src/lib/dal/dispatch.ts`, `src/lib/matching.ts`, `src/lib/osrm.ts`, `src/lib/geo.ts`                                                   |
 | **Member 4: tools inventory & job-state integrity** — tool library, rentals, disputes, auto-confirm, workflow checks, integration tests                       | **Included** | `src/app/controller/tools`, `src/app/controller/disputes`, `src/app/cleaner/tools`, `src/lib/contracts/rental-states.ts`, `src/lib/dal/rentals.ts`, `src/lib/dal/tools.ts`, `src/lib/dal/disputes.ts`, `src/lib/dal/integrity.ts`, `src/app/api/cron`, `tests/integration` |
 
 The **database schema already has every table** (shifts, photos, tools, rentals, ledger…), as agreed
@@ -241,7 +241,7 @@ npm run dev              # http://localhost:3000
 | `grace.home@snowber.test`  | Homeowner with a job to confirm and a booking for tomorrow      |
 | `henry.home@snowber.test`  | Homeowner with an approved senior discount                      |
 | `isla.home@snowber.test`   | Homeowner whose accessibility discount waits for approval       |
-| `controller@snowber.test`  | Time slots, people, discounts, tool library (requests, a clash, an overdue tool), an open dispute, workflow checks |
+| `controller@snowber.test`  | Dispatch board, time slots, people, discounts, tool library (requests, a clash, an overdue tool), an open dispute, workflow checks |
 | `ava.cleaner@snowber.test` | Cleaner with jobs for tomorrow, shifts, a reserved snow blower, earnings and reviews |
 | `ben.cleaner@snowber.test` | Cleaner with a job in progress (before photo taken)             |
 
@@ -362,58 +362,63 @@ DATABASE_URL=postgresql://snowber:snowber@localhost:5432/snowber_test npx prisma
 TEST_DATABASE_URL=postgresql://snowber:snowber@localhost:5432/snowber_test npm run test:integration
 ```
 
-### 5.6 Scripts
+### 5.6 Member 3 Features
+
+- **Dispatch board** (`/controller/dispatch`) — pick a time slot, see requested jobs and cleaners
+  whose shifts cover it, assign one job or a batch, unassign, and move stops up or down on a route.
+  The Leaflet map shows pins and straight lines between ordered stops.
+- **Matching suggestions** (`suggestForWindow` in `src/lib/dal/dispatch.ts`, heuristic in
+  `src/lib/matching.ts`) — proposes cleaner → job pairs from capacity, blower coverage, travel time
+  and rating. Nothing is saved until the controller applies the batch.
+- **Safe batch assignment** (`assignJobs`) — one `prisma.$transaction` with an advisory lock per
+  window, so two controllers cannot overbook the same slot from a stale board. Each assignment still
+  goes through `applyTransition`, which locks the covering shift and (for large driveways) an
+  approved blower rental. Capacity is re-checked against current DB state before commit.
+- **Route order** — after assign / unassign, `reorderRoute` keeps finished stops fixed and orders
+  the rest. By default it uses nearest-neighbor travel times (`src/lib/geo.ts`). With
+  `OSRM_BASE_URL` set it prefers OSRM road-network durations (`src/lib/osrm.ts`) and falls back if
+  OSRM is down or slow.
+- **Blower-aware UI** — the board greys out cleaners who can't take a large driveway
+  (`ownsBlower` or an approved rental covering the slot via `listCleanersWithRentedBlower`).
+- **Live updates** — assignments and route changes publish `dispatch.updated` so other controller
+  tabs and cleaners refresh without a full reload.
+- **Tests** — `tests/matching.test.ts` and `tests/osrm.test.ts` cover heuristics and fallbacks
+  without a live OSRM server; `tests/integration/dispatch.test.ts` covers assignment, persistence,
+  manual ordering, duplicates and shift requirements (see 5.5 for how to run integration tests).
+
+#### OSRM setup (optional)
+
+The board works without OSRM. For road-network ordering, run a local OSRM server built with a
+**walking / foot** profile and set `OSRM_BASE_URL` in `.env` (see `.env.example`, typically
+`http://localhost:5001`). The client calls OSRM's `table` API; the URL path uses OSRM's usual
+`driving` service name, but the graph you load is what actually defines the profile. The public
+OSRM driving demo is not walking routing, and the map never draws OSRM street geometries — only
+straight connectors between ordered stops.
+
+### 5.7 Scripts
 
 | Command                                           | What it does                                                                             |
 | ------------------------------------------------- | ---------------------------------------------------------------------------------------- |
 | `npm run dev`                                     | Development server                                                                       |
 | `npm run build` / `npm start`                     | Production build / server                                                                |
 | `npm run typecheck` · `npm run lint` · `npm test` | Checks run by CI on every pull request                                                   |
-| `npm run test:integration`                        | Cross-role tests against `TEST_DATABASE_URL` (see 5.5)                                   |
+| `npm run test:integration`                        | Cross-role tests against `TEST_DATABASE_URL` (see 5.5; includes dispatch)                |
 | `npm run db:migrate`                              | Create a migration after editing `prisma/schema.prisma` (review schema changes together) |
 | `npm run db:deploy`                               | Apply migrations                                                                         |
 | `npm run db:seed`                                 | Reset and load demo data                                                                 |
 | `npm run db:check`                                | Show which database `.env` uses and whether it's ready                                   |
 
-### 5.7 Where to Plug In (Member 3)
+### 5.8 Shared Contracts (do not bypass)
 
-- **Auth:** call `requireRole("CLEANER")` / `requireRole("CONTROLLER")` in pages and actions (`src/lib/dal/session.ts`); DAL functions re-check with `assertRole`.
-- **Navigation:** add your links to `NAV` in `src/components/app-shell.tsx`.
-- **Job status changes:** go through `transitionJob` / `applyTransition` in `src/lib/dal/jobs.ts`, which validates the state machine, handles refunds and publishes live updates.
-- **Payments:** never touch `Payment` rows directly — refunds go through `getPaymentProvider().refund`, and cleaner earnings use `jobEarnings()` from `src/lib/pricing.ts`.
-- **Live updates:** `publish()` in `src/lib/events.ts`; the browser listens via `/api/events`.
-- **Photos:** `listJobPhotos(user, jobId)` in `src/lib/dal/photos.ts` returns view URLs for any role
-  allowed to see the job; render them with `<JobPhotos photos={...} showFlags />` from
-  `src/components/job-photos.tsx` (controllers should pass `showFlags`).
-- **Cleaner availability:** `listCleanersAvailable(user, { startsAt, endsAt })` in `src/lib/dal/shifts.ts`.
-  Assigning through `transitionJob(jobId, "ASSIGNED", actor, { assignment })` already rejects a cleaner
-  with no shift covering the slot and locks that shift until the transaction commits
-  (`lockCoveringShift`), so dispatch doesn't need its own availability check. For several jobs at once,
-  call `applyTransition` for each inside one `prisma.$transaction`, then `settleOutcomes`.
-- **Snow blowers:** jobs with `requiresBlower` are refused (a `CONFLICT` error with a readable message)
-  unless the cleaner owns a blower (`ownsBlower` from `listCleanersAvailable`) or holds an approved
-  blower rental covering the slot. `listCleanersWithRentedBlower(user, { startsAt, endsAt })` in
-  `src/lib/dal/rentals.ts` returns those cleaners' ids, so the dispatch board can grey out cleaners
-  who can't take large driveways instead of letting the assignment fail.
-- **Tests:** add a dispatch scenario to `tests/integration/` using the helpers in
-  `tests/integration/helpers.ts`.
+Members 1–4 are integrated through these entry points. New pages should call them instead of
+writing status or payment rows by hand:
 
-
-### Dispatch road-network routing (Member 3)
-
-- The dispatch board works without external routing services (local nearest-neighbor fallback).
-- To calculate stop order from **road-network travel durations**, run an OSRM server
-  prepared with a **walking/foot profile** and set `OSRM_BASE_URL` in `.env`
-  (for example `http://localhost:5000`). The server uses OSRM's `table` API
-  when saving route order. The URL path uses OSRM's conventional `driving`
-  service identifier, but its actual routing profile is defined by the graph
-  loaded by your OSRM server. The public OSRM driving demo is not walking routing.
-- The map still draws straight connector lines between ordered stops; it does
-  **not** draw OSRM street geometries. If OSRM is unavailable or too slow,
-  dispatch remains usable through the pre-existing nearest-neighbor ordering.
-- `tests/osrm.test.ts` tests ordering and fallbacks without a live OSRM server.
-- `tests/integration/dispatch.test.ts` checks assignment, persistence, manual
-  ordering, duplicate protection and shift requirements against a **separate**
-  PostgreSQL test database. Use `TEST_DATABASE_URL=.../snowber_test npm run test:integration`
-  only after applying migrations to that throwaway database. These integration
-  tests **erase rows in the test database**; never point them at demo or production data.
+- **Auth:** `requireRole` in pages and actions (`src/lib/dal/session.ts`); DAL functions re-check with `assertRole`.
+- **Navigation:** add links to `NAV` in `src/components/app-shell.tsx`.
+- **Job status:** `transitionJob` / `applyTransition` in `src/lib/dal/jobs.ts` (state machine, refunds, live events). For several jobs in one window, prefer `assignJobs` / `unassignJob` in `src/lib/dal/dispatch.ts`.
+- **Payments:** refunds through `getPaymentProvider().refund`; cleaner pay through `jobEarnings()` in `src/lib/pricing.ts`.
+- **Live updates:** `publish()` in `src/lib/events.ts`; the browser listens on `/api/events`.
+- **Photos:** `listJobPhotos(user, jobId)` + `<JobPhotos showFlags />` for controllers.
+- **Shifts / availability:** `listCleanersAvailable` and `lockCoveringShift` in `src/lib/dal/shifts.ts`.
+- **Blowers:** `listCleanersWithRentedBlower` in `src/lib/dal/rentals.ts`; assignment refuses large driveways without coverage.
+- **Integration tests:** extend `tests/integration/` with the helpers in `tests/integration/helpers.ts`. Those tests wipe `TEST_DATABASE_URL` — never point them at demo or production data.

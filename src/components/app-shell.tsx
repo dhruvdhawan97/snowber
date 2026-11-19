@@ -15,7 +15,6 @@ const NAV: Record<Role, NavItem[]> = {
     { href: "/homeowner/properties/new", label: "Add property" },
     { href: "/homeowner/discounts", label: "Discounts" },
   ],
-  // Dispatch and the jobs list (Member 3) add their links here as they are built.
   CLEANER: [
     { href: "/cleaner", label: "My jobs", exact: true },
     { href: "/cleaner/shifts", label: "Shifts" },
