@@ -395,6 +395,85 @@ The board works without OSRM. For road-network ordering, run a local OSRM server
 OSRM driving demo is not walking routing, and the map never draws OSRM street geometries — only
 straight connectors between ordered stops.
 
+
+##### Running OSRM locally with Docker
+
+OSRM is optional. Snowber uses a nearest-neighbor fallback when the OSRM service is unavailable. The following setup enables road-network travel-time calculations using OpenStreetMap walking data for Toronto.
+
+**Prerequisites:** Docker Desktop running and enough disk space for the map and processed routing files.
+
+1. Download the Toronto OpenStreetMap extract:
+
+```bash
+mkdir -p ~/Desktop/osrm-data
+cd ~/Desktop/osrm-data
+curl -L --fail -o toronto.osm.pbf \
+  https://download.bbbike.org/osm/bbbike/Toronto/Toronto.osm.pbf
+```
+
+2. Extract the pedestrian road network:
+
+```bash
+docker run --rm -t \
+  -v "$(pwd):/data" \
+  ghcr.io/project-osrm/osrm-backend \
+  osrm-extract -p /opt/foot.lua /data/toronto.osm.pbf
+```
+
+3. Prepare the MLD routing data:
+
+```bash
+docker run --rm -t \
+  -v "$(pwd):/data" \
+  ghcr.io/project-osrm/osrm-backend \
+  osrm-partition /data/toronto.osrm
+
+docker run --rm -t \
+  -v "$(pwd):/data" \
+  ghcr.io/project-osrm/osrm-backend \
+  osrm-customize /data/toronto.osrm
+```
+
+4. Start the OSRM service:
+
+```bash
+docker run -d \
+  --name snowber-osrm \
+  -p 127.0.0.1:5001:5000 \
+  -v "$(pwd):/data" \
+  ghcr.io/project-osrm/osrm-backend \
+  osrm-routed --algorithm mld /data/toronto.osrm
+```
+
+5. In the Snowber project's local `.env`, set:
+
+```env
+OSRM_BASE_URL=http://localhost:5001
+```
+
+Restart the Next.js development server after changing `.env`.
+
+6. Verify the OSRM service:
+
+```bash
+curl -sS \
+  "http://localhost:5001/route/v1/foot/-79.3900,43.6600;-79.3800,43.6650?overview=false"
+```
+
+A successful response contains `"code":"Ok"` and route duration/distance values. To inspect incoming requests:
+
+```bash
+docker logs --tail 30 -f snowber-osrm
+```
+
+Assign multiple jobs to a cleaner through the Controller Dispatch board to trigger automatic route reordering. The backend may request `/table/v1/driving/`; the loaded walking-profile graph determines the actual travel network.
+
+**Routing behavior:** The system uses a greedy nearest-next-stop heuristic based on OSRM travel-time estimates. It does not guarantee a globally optimal route. If OSRM is unavailable, returns invalid data, or times out, Snowber falls back to its local nearest-neighbor heuristic.
+
+**Restarting later:** If the container has been stopped, run `docker start snowber-osrm`. There is no need to repeat map extraction, partitioning, or customization.
+
+Do not commit the local `.env`, downloaded map data, or generated OSRM files to GitHub.
+
 ### 5.7 Scripts
 
 | Command                                           | What it does                                                                             |
