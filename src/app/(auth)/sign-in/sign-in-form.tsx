@@ -16,10 +16,11 @@ import { DEMO_LOGINS_ENABLED } from "@/lib/config";
 // Seeded demo accounts (see prisma/seed.ts). The quick-fill buttons are the
 // development "role switcher"; set NEXT_PUBLIC_DEMO_LOGINS=false to hide them.
 const DEMO_ACCOUNTS = [
+  { icon: Home, role: "Homeowner", name: "Olivia", email: "olivia.home@snowber.test", blurb: "Start here: a saved home, nothing booked yet" },
   { icon: Home, role: "Homeowner", name: "Grace", email: "grace.home@snowber.test", blurb: "A job to confirm and a booking for tomorrow" },
-  { icon: Home, role: "Homeowner", name: "Henry", email: "henry.home@snowber.test", blurb: "Approved senior discount (20% off)" },
-  { icon: MapPinned, role: "Controller", name: "Morgan", email: "controller@snowber.test", blurb: "Time slots, people, discounts and system status" },
-  { icon: Shovel, role: "Cleaner", name: "Ava", email: "ava.cleaner@snowber.test", blurb: "Read-only view of assigned jobs and notes" },
+  { icon: Shovel, role: "Cleaner", name: "Ava", email: "ava.cleaner@snowber.test", blurb: "Assigned stops, before/after photos, earnings" },
+  { icon: Shovel, role: "Cleaner", name: "Ben", email: "ben.cleaner@snowber.test", blurb: "A job in progress with the before photo taken" },
+  { icon: MapPinned, role: "Controller", name: "Morgan", email: "controller@snowber.test", blurb: "Dispatch, time slots, discounts and disputes", wide: true },
 ];
 const DEMO_PASSWORD = "snowber-demo";
 
@@ -100,13 +101,13 @@ export function SignInForm() {
               <span className="h-px flex-1 bg-border" />
             </div>
             <div className="grid gap-2 sm:grid-cols-2">
-              {DEMO_ACCOUNTS.map(({ icon: Icon, ...account }) => (
+              {DEMO_ACCOUNTS.map(({ icon: Icon, wide, ...account }) => (
                 <button
                   key={account.email}
                   type="button"
                   disabled={pending || !hydrated}
                   onClick={() => signIn({ email: account.email, password: DEMO_PASSWORD })}
-                  className="flex items-start gap-3 rounded-lg border bg-background p-3 text-left transition-colors hover:border-primary/50 hover:bg-accent disabled:opacity-60"
+                  className={`flex items-start gap-3 rounded-lg border${wide ? " sm:col-span-2" : ""} bg-background p-3 text-left transition-colors hover:border-primary/50 hover:bg-accent disabled:opacity-60`}
                 >
                   <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
                     {pending && demoEmail === account.email ? (

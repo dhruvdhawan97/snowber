@@ -5,6 +5,7 @@ const nextConfig: NextConfig = {
   // request-time parts (session, database) behind <Suspense> boundaries.
   cacheComponents: true,
   partialPrefetching: true,
+  reactStrictMode: false,
   turbopack: {
     rules: {
       "*.css": {

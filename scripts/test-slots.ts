@@ -15,8 +15,8 @@ export async function addTestSlots(prisma: PrismaClient, createdById: string | n
   const rushStart = new Date(Math.ceil(now.getTime() / HOUR) * HOUR + 2 * HOUR);
 
   const slots: { label?: string; startsAt: Date; hours: number; multiplierBps: number }[] = [
-    { label: "Test: rush", startsAt: rushStart, hours: 2, multiplierBps: 10000 },
-    { label: "Test: tonight", startsAt: at(0, 18), hours: 2, multiplierBps: 10000 },
+    { label: "Rush", startsAt: rushStart, hours: 2, multiplierBps: 10000 },
+    { label: "Tonight", startsAt: at(0, 18), hours: 2, multiplierBps: 10000 },
     { startsAt: at(2, 13), hours: 2, multiplierBps: 10000 },
     { startsAt: at(2, 16), hours: 2, multiplierBps: 12500 },
   ];

@@ -1,10 +1,20 @@
 /**
- * Demo data for one fictional neighborhood ("Maple Hollow"): 40 homes, 25 homeowners,
- * 8 cleaner accounts, service windows for tomorrow's storm, bookings in every
- * state a homeowner can see, cleaner shifts, before/after photos (generated
- * images in the configured storage), earnings for confirmed jobs, and a tool
- * library with rentals in every state (reserved, checked out, overdue, waiting
- * for approval, one that clashes with a reservation, returned, declined).
+ * Demo data built around one end-to-end story that can be shown live:
+ *
+ *   1. Olivia (olivia.home) has a saved home and no bookings. She books a slot and pays.
+ *   2. Morgan (controller) opens Dispatch for that slot, clicks Suggest, applies → Ava.
+ *   3. Ava (ava.cleaner) opens the stop, adds a BEFORE photo, starts, adds AFTER, marks done.
+ *   4. Olivia confirms the photos and leaves a review; Ava's earnings go up.
+ *
+ * Every other step is also pre-staged, so any screen can be shown without doing the
+ * live steps first: Grace has a finished job to confirm, Henry has an approved senior
+ * discount, Isla's accessibility request waits for approval, Maya's job is in progress,
+ * Jamal has an open dispute, and a small queue of requests waits on tomorrow's slots.
+ * Maple Hollow is small (12 homes, 8 cleaners; 4 have no shifts yet) so its screens stay
+ * readable, and 8 more cleaners across Toronto cover homeowners who sign up live.
+ *
+ * All times are relative to when the seed runs, so every pricing tier (Rush, Soon,
+ * Standard, Book ahead) is bookable. Re-seed shortly before a demo.
  *
  *   npm run db:seed        (or: npx prisma db seed)
  *
@@ -23,10 +33,11 @@ import { NEIGHBORHOOD_CENTER } from "../src/lib/config";
 import { formatMoney } from "../src/lib/format";
 import { DISPLAY_MAX_PX, THUMB_MAX_PX, derivedKeys } from "../src/lib/photo-rules";
 import { rentalFeeDescription } from "../src/lib/contracts/rental-states";
-import { jobEarnings, quoteForWindows } from "../src/lib/pricing";
+import { discountBpsFor, jobEarnings, quoteForWindows, type DiscountProgramKey } from "../src/lib/pricing";
 import { LOCAL_STORAGE_ROOT, getStorage } from "../src/lib/storage";
 import { addCalendarDays, zonedCalendarDate, zonedTimeToUtc } from "../src/lib/time";
 import { addTestSlots } from "../scripts/test-slots";
+
 
 const prisma = new PrismaClient({ adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL! }) });
 const TZ = process.env.NEXT_PUBLIC_APP_TIMEZONE || "America/Toronto";
@@ -94,6 +105,7 @@ async function seedPhoto(jobId: string, kind: PhotoKind, uploadedById: string, t
   });
 }
 
+
 // ───────────────── main ─────────────────
 
 async function main() {
@@ -108,28 +120,30 @@ async function main() {
   console.log("Creating accounts…");
   const controller = await createUser({ name: "Morgan Lee", email: "controller@snowber.test", role: "CONTROLLER" });
 
-  // Maple Hollow: five streets around the neighborhood center.
+  // Maple Hollow: four short streets around the neighborhood center.
   const streets = [
-    { name: "Maple Crescent", lat: 0.0022, lng: -0.004, dLat: 0, dLng: 0.00045 },
-    { name: "Birch Avenue", lat: 0.0008, lng: -0.004, dLat: 0, dLng: 0.00045 },
-    { name: "Cedar Lane", lat: -0.0006, lng: -0.004, dLat: 0, dLng: 0.00045 },
-    { name: "Willow Street", lat: -0.002, lng: -0.004, dLat: 0, dLng: 0.00045 },
-    { name: "Juniper Road", lat: -0.0026, lng: 0.0006, dLat: 0.0006, dLng: 0 },
+    { name: "Maple Crescent", lat: 0.0018, lng: -0.0025 },
+    { name: "Birch Avenue", lat: 0.0006, lng: -0.0025 },
+    { name: "Cedar Lane", lat: -0.0006, lng: -0.0025 },
+    { name: "Willow Street", lat: -0.0018, lng: -0.0025 },
   ];
   const homeAt = (street: number, index: number) => ({
-    lat: NEIGHBORHOOD_CENTER.lat + streets[street].lat + streets[street].dLat * index + (rand() - 0.5) * 0.00008,
-    lng: NEIGHBORHOOD_CENTER.lng + streets[street].lng + streets[street].dLng * index + (rand() - 0.5) * 0.00008,
+    lat: NEIGHBORHOOD_CENTER.lat + streets[street].lat + (rand() - 0.5) * 0.00008,
+    lng: NEIGHBORHOOD_CENTER.lng + streets[street].lng + 0.00045 * index + (rand() - 0.5) * 0.00008,
   });
+  const addressOf = (street: number, index: number) => `${index * 2 + 10} ${streets[street].name}, Toronto, ON`;
 
+  // Ava lives on Maple Crescent next to Olivia, so Suggest sends Olivia's job to her.
   const cleanerSpecs = [
     { name: "Ava Chen", email: "ava.cleaner@snowber.test", street: 0, index: 2, ownsBlower: false },
-    { name: "Ben Okafor", email: "ben.cleaner@snowber.test", street: 2, index: 15, ownsBlower: true },
-    { name: "Chloe Martin", email: "chloe.cleaner@snowber.test", street: 1, index: 9, ownsBlower: false },
+    { name: "Ben Okafor", email: "ben.cleaner@snowber.test", street: 2, index: 9, ownsBlower: true },
+    { name: "Chloe Martin", email: "chloe.cleaner@snowber.test", street: 1, index: 6, ownsBlower: false },
     { name: "Diego Ramirez", email: "diego.cleaner@snowber.test", street: 3, index: 4, ownsBlower: true },
-    { name: "Emma Wilson", email: "emma.cleaner@snowber.test", street: 4, index: 3, ownsBlower: false },
-    { name: "Farah Haddad", email: "farah.cleaner@snowber.test", street: 3, index: 13, ownsBlower: false },
-    { name: "Gus Novak", email: "gus.cleaner@snowber.test", street: 0, index: 12, ownsBlower: false },
-    { name: "Hana Sato", email: "hana.cleaner@snowber.test", street: 1, index: 1, ownsBlower: false },
+    // Signed up but haven't posted any shifts yet, so Dispatch never offers them.
+    { name: "Emma Wilson", email: "emma.cleaner@snowber.test", street: 1, index: 1, ownsBlower: false },
+    { name: "Farah Haddad", email: "farah.cleaner@snowber.test", street: 3, index: 8, ownsBlower: false },
+    { name: "Gus Novak", email: "gus.cleaner@snowber.test", street: 0, index: 10, ownsBlower: true },
+    { name: "Hana Sato", email: "hana.cleaner@snowber.test", street: 2, index: 1, ownsBlower: false },
   ];
   const cleaners: Awaited<ReturnType<typeof createUser>>[] = [];
   for (const spec of cleanerSpecs) {
@@ -149,64 +163,142 @@ async function main() {
       }),
     );
   }
-  const [ava, ben] = cleaners;
+  const [ava, ben, chloe, diego] = cleaners;
 
-  const firstNames = ["Grace", "Henry", "Isla", "Jamal", "Kiko", "Liam", "Maya", "Noah", "Olivia", "Priya", "Quinn", "Rosa", "Sam", "Tara", "Umar", "Vera", "Will", "Xin", "Yara", "Zoe", "Arjun", "Bea", "Carlos", "Dana", "Eli"];
-  const lastNames = ["Kim", "Brown", "Singh", "Tremblay", "Roy", "Gagnon", "Wong", "Patel", "Lee", "Martin", "Nguyen", "Fraser", "Cohen", "Ali", "Rossi"];
-  const homeowners: Awaited<ReturnType<typeof createUser>>[] = [];
-  for (let i = 0; i < firstNames.length; i++) {
-    const name = `${firstNames[i]} ${i === 0 ? "Kim" : lastNames[i % lastNames.length]}`;
-    const email = i === 0 ? "grace.home@snowber.test" : `${firstNames[i].toLowerCase()}.home@snowber.test`;
-    // Henry already has an approved senior discount; Isla's accessibility request waits for the controller.
-    const extra = i === 1 ? { discountProgram: "SENIOR", discountStatus: "APPROVED" } : i === 2 ? { discountProgram: "ACCESSIBILITY", discountStatus: "PENDING" } : undefined;
-    homeowners.push(await createUser({ name, email, role: "HOMEOWNER", extra }));
-  }
-
-  console.log("Creating 40 properties…");
-  const lotCycle: LotSize[] = ["SMALL", "MEDIUM", "SMALL", "MEDIUM", "LARGE", "MEDIUM", "SMALL", "MEDIUM", "SMALL", "LARGE"];
-  const notes = [null, null, "Please pile snow on the left side.", "Watch the icy front steps.", null, "Gate code 4512.", null, "Car leaves at 7:30 — driveway first please."];
-  const properties: Awaited<ReturnType<typeof prisma.property.create>>[] = [];
-  for (let i = 0; i < 40; i++) {
-    const street = i % 5;
-    const index = Math.floor(i / 5) * 2 + (street % 2);
-    const owner = i < 25 ? homeowners[i] : homeowners[(i - 25) % 6]; // Grace and a few others own two properties
-    const position = homeAt(street, index);
-    properties.push(
-      await prisma.property.create({
-        data: {
-          ownerId: owner.id,
-          label: owner.id === homeowners[0].id ? (i === 0 ? "Home" : "Mom's place") : null,
-          address: `${index * 2 + 10} ${streets[street].name}, Toronto, ON`,
-          lat: position.lat,
-          lng: position.lng,
-          lotSize: lotCycle[i % lotCycle.length],
-          hasSidewalk: i % 7 !== 3,
-          notes: pick(notes),
-        },
+  // Cleaners spread across Toronto, on shift for every open slot, so a homeowner who
+  // signs up live with any Toronto address has someone within walking range (a 2-hour
+  // slot leaves ~65 min of walking for a medium job ≈ 4.9 km at 4.5 km/h).
+  const areaCleanerSpecs = [
+    { name: "Isaac Cohen", email: "isaac.cleaner@snowber.test", area: "Downtown", address: "300 King St W, Toronto, ON", lat: 43.6465, lng: -79.3895, ownsBlower: true },
+    { name: "Julia Rossi", email: "julia.cleaner@snowber.test", area: "Leslieville", address: "1000 Queen St E, Toronto, ON", lat: 43.6615, lng: -79.3375, ownsBlower: false },
+    { name: "Kevin Osei", email: "kevin.cleaner@snowber.test", area: "High Park", address: "2000 Bloor St W, Toronto, ON", lat: 43.6535, lng: -79.4720, ownsBlower: true },
+    { name: "Lena Petrov", email: "lena.cleaner@snowber.test", area: "Midtown", address: "2300 Yonge St, Toronto, ON", lat: 43.7070, lng: -79.3985, ownsBlower: false },
+    { name: "Marcus Hall", email: "marcus.cleaner@snowber.test", area: "North York", address: "5100 Yonge St, Toronto, ON", lat: 43.7680, lng: -79.4130, ownsBlower: true },
+    { name: "Nadia Rahman", email: "nadia.cleaner@snowber.test", area: "Scarborough", address: "300 Borough Dr, Toronto, ON", lat: 43.7750, lng: -79.2580, ownsBlower: true },
+    { name: "Omar Aziz", email: "omar.cleaner@snowber.test", area: "Etobicoke", address: "3000 Bloor St W, Toronto, ON", lat: 43.6450, lng: -79.5200, ownsBlower: false },
+    { name: "Paula Silva", email: "paula.cleaner@snowber.test", area: "East York", address: "1000 Pape Ave, Toronto, ON", lat: 43.6900, lng: -79.3480, ownsBlower: false },
+  ];
+  const areaCleaners: Awaited<ReturnType<typeof createUser>>[] = [];
+  for (const [i, spec] of areaCleanerSpecs.entries()) {
+    areaCleaners.push(
+      await createUser({
+        name: spec.name,
+        email: spec.email,
+        role: "CLEANER",
+        extra: { homeAddress: spec.address, homeLat: spec.lat, homeLng: spec.lng, ownsBlower: spec.ownsBlower, phone: `416-555-02${String(i).padStart(2, "0")}` },
       }),
     );
   }
 
-  console.log("Creating service windows…");
+  type HomeSpec = { label?: string; street: number; index: number; lot: LotSize; sidewalk?: boolean; notes?: string };
+  type OwnerSpec = { key: string; name: string; discount?: { program: DiscountProgramKey; status: "APPROVED" | "PENDING" }; homes: HomeSpec[] };
+  const ownerSpecs: OwnerSpec[] = [
+    // The live-demo homeowner: one saved home, nothing booked yet.
+    { key: "olivia", name: "Olivia Park", homes: [{ label: "Home", street: 0, index: 3, lot: "MEDIUM", notes: "Please clear a path to the side door too." }] },
+    {
+      key: "grace",
+      name: "Grace Kim",
+      homes: [
+        { label: "Home", street: 0, index: 6, lot: "SMALL" },
+        { label: "Mom's place", street: 1, index: 2, lot: "MEDIUM", notes: "Watch the icy front steps." },
+      ],
+    },
+    { key: "henry", name: "Henry Brown", discount: { program: "SENIOR", status: "APPROVED" }, homes: [{ street: 1, index: 4, lot: "MEDIUM", notes: "Car leaves at 7:30 — driveway first please." }] },
+    { key: "isla", name: "Isla Singh", discount: { program: "ACCESSIBILITY", status: "PENDING" }, homes: [{ street: 2, index: 3, lot: "SMALL", notes: "Ramp on the left side of the house." }] },
+    { key: "jamal", name: "Jamal Tremblay", homes: [{ street: 2, index: 6, lot: "MEDIUM" }] },
+    { key: "kiko", name: "Kiko Roy", homes: [{ street: 3, index: 1, lot: "SMALL" }] },
+    { key: "liam", name: "Liam Gagnon", homes: [{ street: 3, index: 6, lot: "LARGE", notes: "Corner lot, two driveways." }] },
+    { key: "maya", name: "Maya Wong", homes: [{ street: 2, index: 8, lot: "MEDIUM" }] },
+    { key: "noah", name: "Noah Patel", homes: [{ street: 0, index: 8, lot: "LARGE" }] },
+    { key: "priya", name: "Priya Nguyen", homes: [{ street: 1, index: 7, lot: "SMALL", sidewalk: false }] },
+    { key: "sam", name: "Sam Fraser", homes: [{ street: 3, index: 3, lot: "MEDIUM", notes: pick(["Gate code 4512.", "Pile snow on the left side."]) }] },
+  ];
+
+  const owners: Record<string, Awaited<ReturnType<typeof createUser>>> = {};
+  const homes: Record<string, Awaited<ReturnType<typeof prisma.property.create>>[]> = {};
+  const discountOf = new Map<string, number>();
+  for (const spec of ownerSpecs) {
+    const extra = spec.discount ? { discountProgram: spec.discount.program, discountStatus: spec.discount.status } : undefined;
+    const owner = await createUser({ name: spec.name, email: `${spec.key}.home@snowber.test`, role: "HOMEOWNER", extra });
+    owners[spec.key] = owner;
+    discountOf.set(owner.id, discountBpsFor(spec.discount?.program, spec.discount?.status));
+    homes[spec.key] = [];
+    for (const h of spec.homes) {
+      const position = homeAt(h.street, h.index);
+      homes[spec.key].push(
+        await prisma.property.create({
+          data: {
+            ownerId: owner.id,
+            label: h.label ?? null,
+            address: addressOf(h.street, h.index),
+            lat: position.lat,
+            lng: position.lng,
+            lotSize: h.lot,
+            hasSidewalk: h.sidewalk ?? true,
+            notes: h.notes ?? null,
+          },
+        }),
+      );
+    }
+  }
+  const home = (key: string, i = 0) => homes[key][i];
+
+  console.log("Creating time slots…");
   const recentStart = new Date(Math.floor((now.getTime() - 3 * HOUR) / HOUR) * HOUR);
   const windows = {
     yesterday: await prisma.serviceWindow.create({ data: { startsAt: at(-1, 7), endsAt: at(-1, 9), multiplierBps: 12500, status: "CLOSED", createdById: controller.id } }),
     recent: await prisma.serviceWindow.create({ data: { startsAt: recentStart, endsAt: new Date(recentStart.getTime() + 2 * HOUR), multiplierBps: 10000, status: "CLOSED", createdById: controller.id } }),
     early: await prisma.serviceWindow.create({ data: { label: "Early birds", startsAt: at(1, 6), endsAt: at(1, 8), multiplierBps: 15000, createdById: controller.id } }),
-    mid: await prisma.serviceWindow.create({ data: { startsAt: at(1, 8), endsAt: at(1, 10), multiplierBps: 12500, createdById: controller.id } }),
-    late: await prisma.serviceWindow.create({ data: { startsAt: at(1, 10), endsAt: at(1, 12), multiplierBps: 10000, createdById: controller.id } }),
+    mid: await prisma.serviceWindow.create({ data: { label: "Morning", startsAt: at(1, 8), endsAt: at(1, 10), multiplierBps: 12500, createdById: controller.id } }),
+    late: await prisma.serviceWindow.create({ data: { label: "Late morning", startsAt: at(1, 10), endsAt: at(1, 12), multiplierBps: 10000, createdById: controller.id } }),
     nextDay: await prisma.serviceWindow.create({ data: { startsAt: at(2, 7), endsAt: at(2, 9), multiplierBps: 10000, createdById: controller.id } }),
   };
-
+  // Rush (starts in ~2h), tonight, the day after tomorrow and the following week:
+  // together with the slots above, every timing tier can be booked.
   const extraSlots = await addTestSlots(prisma, controller.id, TZ);
-  console.log(`Added ${extraSlots} extra test time slots for the next 7 days`);
+  console.log(`Added ${extraSlots} extra time slots for the next 7 days`);
+
+  console.log("Posting cleaner shifts…");
+  // Ava and Ben cover every open slot (so whatever Olivia books, Dispatch can place it);
+  // The area cleaners do too; Chloe and Diego only work tomorrow's storm. Overlapping shifts are merged.
+  const openSlots = await prisma.serviceWindow.findMany({ where: { status: "OPEN" }, orderBy: { startsAt: "asc" } });
+  const shiftsFor = new Map<string, { from: Date; to: Date }[]>();
+  const addShift = (cleanerId: string, from: Date, to: Date) => shiftsFor.set(cleanerId, [...(shiftsFor.get(cleanerId) ?? []), { from, to }]);
+  for (const c of [ava, ben]) {
+    addShift(c.id, at(-1, 6), at(-1, 11));
+    addShift(c.id, new Date(recentStart.getTime() - HOUR), new Date(recentStart.getTime() + 3 * HOUR));
+  }
+  for (const c of [ava, ben, ...areaCleaners]) {
+    for (const w of openSlots) addShift(c.id, new Date(w.startsAt.getTime() - 30 * 60 * 1000), new Date(w.endsAt.getTime() + 30 * 60 * 1000));
+  }
+  addShift(chloe.id, at(1, 8), at(1, 12));
+  addShift(diego.id, at(1, 6), at(1, 10));
+  for (const [cleanerId, list] of shiftsFor) {
+    const merged: { from: Date; to: Date }[] = [];
+    for (const s of [...list].sort((a, b) => a.from.getTime() - b.from.getTime())) {
+      const last = merged[merged.length - 1];
+      if (last && s.from <= last.to) last.to = new Date(Math.max(last.to.getTime(), s.to.getTime()));
+      else merged.push({ ...s });
+    }
+    for (const s of merged) await prisma.shift.create({ data: { cleanerId, startsAt: s.from, endsAt: s.to } });
+  }
 
   console.log("Booking jobs…");
   type W = keyof typeof windows;
-  async function book(propertyIndex: number, options: W[], extra: { tipCents?: number; includeSalt?: boolean; createdAt?: Date } = {}) {
-    const property = properties[propertyIndex];
+  let paymentSeq = 0;
+  async function book(
+    property: Awaited<ReturnType<typeof prisma.property.create>>,
+    options: W[],
+    extra: { tipCents?: number; includeSalt?: boolean; createdAt?: Date; notes?: string } = {},
+  ) {
     const opts = options.map((k) => windows[k]);
-    const q = quoteForWindows({ lotSize: property.lotSize, includeSidewalk: property.hasSidewalk, includeSalt: extra.includeSalt ?? false }, opts, extra.createdAt ?? now);
+    const bookedAt = extra.createdAt ?? new Date(now.getTime() - (20 - paymentSeq) * 9 * 60 * 1000);
+    const discountBps = discountOf.get(property.ownerId) ?? 0;
+    const q = quoteForWindows(
+      { lotSize: property.lotSize, includeSidewalk: property.hasSidewalk, includeSalt: extra.includeSalt ?? false, discountBps },
+      opts,
+      bookedAt,
+    );
     const tipCents = extra.tipCents ?? 0;
     return prisma.job.create({
       data: {
@@ -214,13 +306,16 @@ async function main() {
         homeownerId: property.ownerId,
         includeSidewalk: property.hasSidewalk,
         includeSalt: extra.includeSalt ?? false,
+        notes: extra.notes ?? null,
         priceCents: q.totalCents,
+        discountBps: q.discountBps,
+        discountCents: q.discountCents,
         tipCents,
         estMinutes: q.estMinutes,
         requiresBlower: q.requiresBlower,
-        createdAt: extra.createdAt ?? new Date(now.getTime() - (40 - propertyIndex) * 7 * 60 * 1000),
+        createdAt: bookedAt,
         windowOptions: { connect: opts.map((w) => ({ id: w.id })) },
-        payment: { create: { provider: "mock", externalId: `mock_ch_seed_${propertyIndex}`, amountCents: q.totalCents + tipCents } },
+        payment: { create: { provider: "mock", externalId: `mock_ch_seed_${++paymentSeq}`, amountCents: q.totalCents + tipCents } },
       },
       include: { property: true },
     });
@@ -231,7 +326,7 @@ async function main() {
     cleanerId: string,
     windowKey: W,
     status: JobStatus,
-    when: { assigned: Date; started?: Date; completed?: Date; confirmed?: Date },
+    when: { assigned: Date; started?: Date; completed?: Date; confirmed?: Date; routeOrder?: number },
   ) {
     await prisma.job.update({
       where: { id: job.id },
@@ -243,120 +338,79 @@ async function main() {
         startedAt: when.started,
         completedAt: when.completed,
         confirmedAt: when.confirmed,
+        routeOrder: when.routeOrder ?? 1,
         disputeReason: status === "DISPUTED" ? "The sidewalk was still icy and the end of the driveway wasn't cleared." : null,
       },
     });
   }
 
-  // Yesterday: finished history for Ava and Ben.
+  async function credit(job: Awaited<ReturnType<typeof book>>, cleanerId: string, at: Date) {
+    await prisma.ledgerEntry.create({
+      data: {
+        cleanerId,
+        type: "EARNING",
+        amountCents: jobEarnings(job),
+        jobId: job.id,
+        description: `${job.property.address}${job.tipCents > 0 ? ` (incl. ${formatMoney(job.tipCents)} tip)` : ""}`,
+        createdAt: at,
+      },
+    });
+  }
+
+  // ── Yesterday: finished history (earnings, reviews) and one dispute.
   const y = (h: number, m = 0) => at(-1, h, m);
   const history = [
-    { p: 5, c: ava, st: "CONFIRMED" as const, tip: 500 },
-    { p: 10, c: ava, st: "CONFIRMED" as const },
-    { p: 15, c: ben, st: "CONFIRMED" as const },
-    { p: 20, c: ben, st: "CONFIRMED" as const, tip: 1000 },
-    { p: 25, c: ben, st: "DISPUTED" as const },
+    { key: "grace", c: ava, st: "CONFIRMED" as const, tip: 500, review: { rating: 5, comment: "Spotless, even the sidewalk!" } },
+    { key: "kiko", c: ava, st: "CONFIRMED" as const, review: { rating: 5, comment: "Quick and friendly." } },
+    { key: "liam", c: ben, st: "CONFIRMED" as const, tip: 1000, review: { rating: 4, comment: "Good job, missed a corner." } },
+    { key: "jamal", c: ben, st: "DISPUTED" as const },
   ];
   for (const [i, h] of history.entries()) {
-    const job = await book(h.p, ["yesterday"], { tipCents: h.tip, createdAt: at(-2, 18, i * 5) });
+    const job = await book(home(h.key), ["yesterday"], { tipCents: h.tip, createdAt: at(-2, 18, i * 5) });
     const confirmedAt = h.st === "CONFIRMED" ? y(10, i * 10) : undefined;
     await advance(job, h.c.id, "yesterday", h.st, {
       assigned: at(-2, 20),
       started: y(7, i * 15),
       completed: y(7, i * 15 + 25),
       confirmed: confirmedAt,
+      routeOrder: (i % 2) + 1,
     });
-    await prisma.job.update({ where: { id: job.id }, data: { routeOrder: (i % 3) + 1 } });
     await seedPhoto(job.id, "BEFORE", h.c.id, y(7, i * 15 - 1), i);
     await seedPhoto(job.id, "AFTER", h.c.id, y(7, i * 15 + 24), i);
     if (confirmedAt) {
-      await prisma.ledgerEntry.create({
-        data: {
-          cleanerId: h.c.id,
-          type: "EARNING",
-          amountCents: jobEarnings(job),
-          jobId: job.id,
-          description: `${job.property.address}${job.tipCents > 0 ? ` (incl. ${formatMoney(job.tipCents)} tip)` : ""}`,
-          createdAt: confirmedAt,
-        },
-      });
+      await credit(job, h.c.id, confirmedAt);
+      if (h.review) await prisma.review.create({ data: { jobId: job.id, authorId: job.homeownerId, subjectId: h.c.id, rating: h.review.rating, comment: h.review.comment } });
+      await prisma.review.create({ data: { jobId: job.id, authorId: h.c.id, subjectId: job.homeownerId, rating: 5, comment: "Accurate size, easy access." } });
     }
   }
-  // Two-way reviews on the confirmed history.
-  const confirmed = await prisma.job.findMany({ where: { status: "CONFIRMED" }, select: { id: true, cleanerId: true, homeownerId: true } });
-  for (const [i, job] of confirmed.entries()) {
-    await prisma.review.create({ data: { jobId: job.id, authorId: job.homeownerId, subjectId: job.cleanerId!, rating: [5, 5, 4, 5][i % 4], comment: ["Spotless, even the sidewalk!", "Quick and friendly.", "Good job, missed a corner.", null][i % 4] } });
-    if (i % 2 === 0) await prisma.review.create({ data: { jobId: job.id, authorId: job.cleanerId!, subjectId: job.homeownerId, rating: 5, comment: "Accurate size, easy access." } });
-  }
 
-  // Earlier today: one job waiting for Grace to confirm, one still in progress.
-  const graceDone = await book(0, ["recent"], { tipCents: 500, createdAt: new Date(recentStart.getTime() - 10 * HOUR) });
-  await advance(graceDone, ava.id, "recent", "COMPLETED", {
-    assigned: new Date(recentStart.getTime() - 8 * HOUR),
-    started: new Date(recentStart.getTime() + 20 * 60 * 1000),
-    completed: new Date(Math.min(now.getTime() - 30 * 60 * 1000, recentStart.getTime() + 55 * 60 * 1000)),
-  });
-  await prisma.job.update({ where: { id: graceDone.id }, data: { routeOrder: 1 } });
-  const graceDoneAt = (await prisma.job.findUniqueOrThrow({ where: { id: graceDone.id } })).completedAt!;
-  await seedPhoto(graceDone.id, "BEFORE", ava.id, new Date(recentStart.getTime() + 19 * 60 * 1000), 0);
+  // ── Earlier today: Grace has a finished job to confirm; Ben is mid-job at Maya's.
+  const graceDone = await book(home("grace"), ["recent"], { tipCents: 500, createdAt: new Date(recentStart.getTime() - 10 * HOUR) });
+  const graceStarted = new Date(recentStart.getTime() + 20 * 60 * 1000);
+  const graceDoneAt = new Date(Math.max(graceStarted.getTime() + 10 * 60 * 1000, Math.min(now.getTime() - 30 * 60 * 1000, recentStart.getTime() + 55 * 60 * 1000)));
+  await advance(graceDone, ava.id, "recent", "COMPLETED", { assigned: new Date(recentStart.getTime() - 8 * HOUR), started: graceStarted, completed: graceDoneAt });
+  await seedPhoto(graceDone.id, "BEFORE", ava.id, new Date(graceStarted.getTime() - 60 * 1000), 0);
   await seedPhoto(graceDone.id, "AFTER", ava.id, new Date(graceDoneAt.getTime() - 60 * 1000), 0);
-  const benWorking = await book(12, ["recent"], { createdAt: new Date(recentStart.getTime() - 9 * HOUR) });
-  await advance(benWorking, ben.id, "recent", "IN_PROGRESS", {
-    assigned: new Date(recentStart.getTime() - 8 * HOUR),
-    started: new Date(now.getTime() - 15 * 60 * 1000),
-  });
-  await prisma.job.update({ where: { id: benWorking.id }, data: { routeOrder: 1 } });
-  await seedPhoto(benWorking.id, "BEFORE", ben.id, new Date(now.getTime() - 16 * 60 * 1000), 2);
 
-  // Tomorrow's storm: a surge of requests across the three windows.
-  const optionSets: W[][] = [["early"], ["early", "mid"], ["mid"], ["mid", "late"], ["late"], ["early", "mid", "late"]];
-  for (let i = 1; i < 40; i++) {
-    if ([5, 10, 15, 20, 25, 12].includes(i) || i % 9 === 8) continue; // history above, and some homes didn't book
-    await book(i, optionSets[i % optionSets.length], { tipCents: i % 4 === 0 ? 500 : 0, includeSalt: i % 6 === 0 });
-  }
-  // Grace's own home also books an early slot.
-  await book(0, ["early", "mid"], { tipCents: 500 });
+  const mayaWorking = await book(home("maya"), ["recent"], { createdAt: new Date(recentStart.getTime() - 9 * HOUR) });
+  await advance(mayaWorking, ben.id, "recent", "IN_PROGRESS", { assigned: new Date(recentStart.getTime() - 8 * HOUR), started: new Date(now.getTime() - 15 * 60 * 1000) });
+  await seedPhoto(mayaWorking.id, "BEFORE", ben.id, new Date(now.getTime() - 16 * 60 * 1000), 2);
 
-  // The controller already placed the oldest early requests with Ava and Ben,
-  // so homeowners can see "Cleaner assigned". The rest wait in the queue.
-  const earlyJobs = await prisma.job.findMany({
-    where: { status: "REQUESTED", windowOptions: { some: { id: windows.early.id } } },
-    orderBy: { createdAt: "asc" },
-    take: 4,
-  });
-  for (const [i, job] of earlyJobs.entries()) {
-    await prisma.job.update({
-      where: { id: job.id },
-      data: { status: "ASSIGNED", cleanerId: i < 2 ? ava.id : ben.id, assignedWindowId: windows.early.id, assignedAt: now, routeOrder: (i % 2) + 1 },
-    });
-  }
-  // Notes so the cleaner preview shows what homeowners wrote.
-  if (earlyJobs[0]) {
-    await prisma.job.update({ where: { id: earlyJobs[0].id }, data: { notes: "Please clear a path to the side door too." } });
-    await prisma.property.update({ where: { id: earlyJobs[0].propertyId }, data: { notes: "Gate code 4512. Pile snow on the left side." } });
-  }
+  // ── Tomorrow's storm. Two jobs are already placed (so cleaners have stops and Henry
+  // sees "Cleaner assigned" with his discount); the rest wait in the Dispatch queue.
+  const henryJob = await book(home("henry"), ["early"], { notes: "Please salt the front steps.", includeSalt: true });
+  await advance(henryJob, ava.id, "early", "ASSIGNED", { assigned: now, routeOrder: 1 });
+  const noahJob = await book(home("noah"), ["early", "mid"], { tipCents: 500 });
+  await advance(noahJob, ben.id, "early", "ASSIGNED", { assigned: now, routeOrder: 1 });
 
-  console.log("Posting cleaner shifts…");
-  const [, , chloe, diego, emma] = cleaners;
-  const shiftSpecs = [
-    // Yesterday and earlier today, covering the jobs already worked.
-    { c: ava, from: at(-1, 6), to: at(-1, 11) },
-    { c: ben, from: at(-1, 6), to: at(-1, 11) },
-    { c: ava, from: new Date(recentStart.getTime() - HOUR), to: new Date(recentStart.getTime() + 3 * HOUR) },
-    { c: ben, from: new Date(recentStart.getTime() - HOUR), to: new Date(recentStart.getTime() + 3 * HOUR) },
-    // Tomorrow's storm and the day after.
-    { c: ava, from: at(1, 6), to: at(1, 12) },
-    { c: ben, from: at(1, 6), to: at(1, 12) },
-    { c: chloe, from: at(1, 8), to: at(1, 12) },
-    { c: diego, from: at(1, 6), to: at(1, 10) },
-    { c: emma, from: at(1, 10), to: at(1, 14) },
-    { c: ava, from: at(2, 7), to: at(2, 11) },
-    { c: diego, from: at(2, 7), to: at(2, 9) },
-  ];
-  for (const s of shiftSpecs) await prisma.shift.create({ data: { cleanerId: s.c.id, startsAt: s.from, endsAt: s.to } });
+  await book(home("grace", 1), ["early", "mid"], { tipCents: 500 });
+  await book(home("priya"), ["early"]);
+  await book(home("sam"), ["mid"], { includeSalt: true });
+  await book(home("kiko"), ["mid", "late"]);
+  await book(home("liam"), ["early", "mid", "late"], { tipCents: 500 });
+  await book(home("jamal"), ["late"]);
 
   console.log("Stocking the tool library…");
-  const [, , , , , farah, gus] = cleaners;
   const tool = async (name: string, type: "SHOVEL" | "SNOW_BLOWER" | "SALT_SPREADER" | "ICE_CHOPPER", feeCents: number, extra: { status?: "MAINTENANCE"; notes?: string } = {}) =>
     prisma.tool.create({ data: { name, type, feeCents, ...extra } });
   const tools = {
@@ -382,39 +436,32 @@ async function main() {
     });
     if (status === "APPROVED" || status === "RETURNED") {
       await prisma.ledgerEntry.create({
-        data: {
-          cleanerId,
-          type: "RENTAL_FEE",
-          amountCents: -t.feeCents,
-          rentalId: rental.id,
-          description: rentalFeeDescription(t.name, rental),
-          createdAt: decidedAt ?? now,
-        },
+        data: { cleanerId, type: "RENTAL_FEE", amountCents: -t.feeCents, rentalId: rental.id, description: rentalFeeDescription(t.name, rental), createdAt: decidedAt ?? now },
       });
     }
     return rental;
   }
-  // Ava has no snow blower of her own: she rented one yesterday, and has one reserved for
-  // tomorrow's storm, which covers the large driveways the controller gave her.
+  // Ava has no snow blower of her own: she rented one yesterday and has one reserved for tomorrow.
   await rent(tools.blowerA, ava.id, at(-1, 6), at(-1, 11), "RETURNED", at(-2, 19));
   await rent(tools.blowerA, ava.id, at(1, 6), at(1, 12), "APPROVED", new Date(now.getTime() - 2 * HOUR));
-  // Ben took the ice chopper out this morning and hasn't brought it back.
+  // Ben took the ice chopper out this morning and hasn't brought it back (overdue).
   await rent(tools.chopper, ben.id, new Date(recentStart.getTime() - HOUR), new Date(recentStart.getTime() + 2 * HOUR), "APPROVED", new Date(recentStart.getTime() - 2 * HOUR));
-  // Waiting for the controller: Chloe wants blower B for her shift; Emma asked for
-  // blower A, which overlaps Ava's reservation, so it can only be declined.
+  // Waiting for the controller: Chloe wants blower B; Diego asked for blower A, which
+  // clashes with Ava's reservation, so it can only be declined.
   await rent(tools.blowerB, chloe.id, at(1, 8), at(1, 12), "REQUESTED");
-  await rent(tools.blowerA, emma.id, at(1, 10), at(1, 14), "REQUESTED");
-  await rent(tools.spreader, gus.id, at(2, 7), at(2, 11), "REQUESTED");
-  await rent(tools.shovel, diego.id, at(2, 7), at(2, 9), "APPROVED", new Date(now.getTime() - HOUR));
-  await rent(tools.blowerB, farah.id, at(-1, 6), at(-1, 10), "REJECTED", at(-2, 20));
+  await rent(tools.blowerA, diego.id, at(1, 10), at(1, 14), "REQUESTED");
+  await rent(tools.spreader, chloe.id, at(-1, 6), at(-1, 10), "REJECTED", at(-2, 20));
 
   const counts = await prisma.job.groupBy({ by: ["status"], _count: { _all: true } });
+  const rush = openSlots.find((w) => w.label === "Rush");
   console.log("Jobs by status:", Object.fromEntries(counts.map((c) => [c.status, c._count._all])));
-  console.log(`\nSeeded ${homeowners.length} homeowners, ${cleaners.length} cleaners, ${properties.length} properties.`);
-  console.log(`Sign in with any demo account, password "${PASSWORD}":`);
-  console.log("  grace.home@snowber.test · henry.home@snowber.test (senior discount) · controller@snowber.test");
-  console.log("  ava.cleaner@snowber.test · ben.cleaner@snowber.test (cleaner portal: jobs, photos, shifts, tools, earnings)");
-  console.log(`Tool library: ${Object.keys(tools).length} tools; requests, reservations and an overdue rental for controller@snowber.test.`);
+  console.log(`\nSeeded ${ownerSpecs.length} homeowners, ${cleaners.length + areaCleaners.length} cleaners, ${Object.values(homes).flat().length} homes, ${openSlots.length} open time slots.`);
+  console.log(`\nDemo walkthrough (password "${PASSWORD}"):`);
+  console.log(`  1. olivia.home@snowber.test  → Book clearing → pick a slot${rush ? ` (Rush slot starts ${rush.startsAt.toLocaleTimeString("en-CA", { timeZone: TZ, hour: "numeric", minute: "2-digit" })})` : ""} → pay`);
+  console.log("  2. controller@snowber.test   → Dispatch → pick Olivia's slot → Suggest → Apply (goes to Ava)");
+  console.log("  3. ava.cleaner@snowber.test  → open the stop → before photo → Start → after photo → Mark done");
+  console.log("  4. olivia.home@snowber.test  → open the job → Looks good — confirm → review");
+  console.log("  Ready-made: grace (job to confirm) · henry (senior discount) · isla (discount to approve) · ben (in progress) · jamal (dispute)");
 }
 
 main()
